@@ -2,7 +2,7 @@
 // @id              auto-refresh-rate
 // @name            Auto Refresh Rate
 // @description     Automatically switch monitor refresh rates based on AC/battery power, fullscreen games, foreground apps, and docking.
-// @version         0.1.0
+// @version         0.2.0
 // @author          roypriyanshu02
 // @github          https://github.com/roypriyanshu02
 // @homepage        https://github.com/roypriyanshu02/windhawk-auto-refresh-rate
@@ -217,11 +217,147 @@ For bug reports, feature requests, and source code, visit the **[GitHub reposito
 #include <optional>
 #include <atomic>
 
+// GUID Definitions
+static constexpr GUID GUID_NULL_LOCAL = {
+    0x00000000, 0x0000, 0x0000, { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }
+};
+static constexpr GUID GUID_ACDC_POWER_SOURCE_LOCAL = {
+    0x5D3E9A59, 0xE9D5, 0x4B00, { 0xA6, 0xBD, 0xFF, 0x34, 0xFF, 0x51, 0x65, 0x48 }
+};
+static constexpr GUID GUID_BATTERY_PERCENTAGE_REMAINING_LOCAL = {
+    0xA7AD8041, 0xB45A, 0x4CAE, { 0x87, 0xA3, 0xEE, 0xCB, 0xB4, 0x68, 0xA9, 0xE1 }
+};
+static constexpr GUID GUID_POWER_SAVING_STATUS_LOCAL = {
+    0xE00958C0, 0xC213, 0x4ACE, { 0xAC, 0x77, 0xFE, 0xCC, 0xED, 0x2E, 0xEE, 0xA5 }
+};
+static constexpr GUID GUID_POWERSCHEME_PERSONALITY_LOCAL = {
+    0x245D8541, 0x3943, 0x4422, { 0xB0, 0x25, 0x13, 0xA7, 0x84, 0xF6, 0x79, 0xB7 }
+};
+static constexpr GUID GUID_MIN_POWER_SAVINGS_LOCAL = {
+    0x8C5E7FDA, 0xE8BF, 0x4A96, { 0x9A, 0x85, 0xA6, 0xE2, 0x3A, 0x8C, 0x63, 0x5C }
+};
+static constexpr GUID GUID_OVERLAY_BEST_PERFORMANCE = {
+    0xDED574B5, 0x45A0, 0x4F42, { 0x87, 0x37, 0x46, 0x34, 0x5C, 0x09, 0xC2, 0x38 }
+};
+
+#ifndef PBT_POWERSETTINGCHANGE
+#define PBT_POWERSETTINGCHANGE 0x8013
+#endif
+#ifndef CDS_NORESET
+#define CDS_NORESET 0x10000000
+#endif
+#ifndef QDC_ONLY_ACTIVE_PATHS
+#define QDC_ONLY_ACTIVE_PATHS 0x00000002
+#endif
+#ifndef DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL
+#define DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL 0x80000000
+#endif
+#ifndef DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED
+#define DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED 11
+#endif
+#ifndef DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED
+#define DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED 13
+#endif
+#ifndef DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS
+#define DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS 6
+#endif
+#ifndef DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME
+#define DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME 1
+#endif
+#ifndef EDS_ROTATEDMODE
+#define EDS_ROTATEDMODE 0x00000004
+#endif
+
+// Custom window messages and timer identifiers
+constexpr UINT WM_APP_REAPPLY_POWER_STATE   = WM_APP + 101;
+constexpr UINT WM_APP_FOREGROUND_CHANGED    = WM_APP + 102;
+constexpr UINT WM_APP_SETTINGS_CHANGED      = WM_APP + 103;
+
+constexpr UINT_PTR TIMER_ID_POWER_DEBOUNCE      = 1;
+constexpr UINT_PTR TIMER_ID_RESUME_SYNC         = 2;
+constexpr UINT_PTR TIMER_ID_DISPLAY_CHANGE      = 3;
+constexpr UINT_PTR TIMER_ID_TIME_CHECK          = 4;
+constexpr UINT_PTR TIMER_ID_FOREGROUND_DEBOUNCE = 6;
+constexpr UINT_PTR TIMER_ID_QUIET_SWITCH        = 7;
+constexpr UINT_PTR TIMER_ID_COOLDOWN_SWITCH     = 8;
+
+constexpr UINT_PTR TIMER_ID_OSD_HOLD            = 101;
+constexpr UINT_PTR TIMER_ID_OSD_FADE            = 102;
+
+constexpr int HOTKEY_ID_CYCLE                   = 0x415A;
+
+constexpr DWORD DEBOUNCE_DELAY_MS               = 350;
+constexpr DWORD RESUME_DELAY_MS                 = 1000;
+constexpr DWORD DISPLAY_CHANGE_DELAY_MS         = 500;
+constexpr DWORD FOREGROUND_DEBOUNCE_MS          = 100;
+constexpr DWORD QUIET_SWITCH_TIMEOUT_MS         = 2000;
+constexpr DWORD TIME_CHECK_INTERVAL_MS          = 30000;
+
+
+struct PowerStateSnapshot {
+    bool isAC = true;
+    BYTE batteryPercent = 100;
+    bool isBatterySaverActive = false;
+};
+
+static std::atomic<HWND> g_hWnd{nullptr};
+static HANDLE g_hThread = nullptr;
+
+LRESULT CALLBACK WorkerWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    switch (uMsg) {
+    case WM_CREATE:
+        Wh_Log(L"Worker window created. Registering power setting notifications.");
+        RegisterPowerSettingNotification(hWnd, &GUID_ACDC_POWER_SOURCE_LOCAL, DEVICE_NOTIFY_WINDOW_HANDLE);
+        RegisterPowerSettingNotification(hWnd, &GUID_POWERSAVINGMODE_LOCAL, DEVICE_NOTIFY_WINDOW_HANDLE);
+        return 0;
+    case WM_POWERBROADCAST:
+        if (wParam == PBT_POWERSETTINGCHANGE) {
+            Wh_Log(L"Power broadcast received.");
+        }
+        return TRUE;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(hWnd, uMsg, wParam, lParam);
+}
+
+DWORD WINAPI WorkerThreadProc(LPVOID lpParam) {
+    HANDLE hInitEvent = static_cast<HANDLE>(lpParam);
+    WNDCLASSEXW wc = { sizeof(wc) };
+    wc.lpfnWndProc = WorkerWndProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"AutoHzWorkerWndClass";
+    RegisterClassExW(&wc);
+
+    HWND hWnd = CreateWindowExW(0, wc.lpszClassName, L"AutoHzWorker", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
+    g_hWnd.store(hWnd);
+    SetEvent(hInitEvent);
+
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    return 0;
+}
+
 BOOL Wh_ModInit() {
-    Wh_Log(L"Auto Refresh Rate mod initialized.");
+    HANDLE hInitEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    g_hThread = CreateThread(nullptr, 0, WorkerThreadProc, hInitEvent, 0, nullptr);
+    WaitForSingleObject(hInitEvent, 5000);
+    CloseHandle(hInitEvent);
+    Wh_Log(L"Auto Refresh Rate worker thread started.");
     return TRUE;
 }
 
 void Wh_ModUninit() {
+    HWND hWnd = g_hWnd.load();
+    if (hWnd) PostMessageW(hWnd, WM_CLOSE, 0, 0);
+    if (g_hThread) {
+        WaitForSingleObject(g_hThread, 5000);
+        CloseHandle(g_hThread);
+        g_hThread = nullptr;
+    }
     Wh_Log(L"Auto Refresh Rate mod uninitialized.");
 }
