@@ -2,7 +2,7 @@
 // @id              auto-refresh-rate
 // @name            Auto Refresh Rate
 // @description     Automatically switch monitor refresh rates based on AC/battery power, fullscreen games, foreground apps, and docking.
-// @version         0.2.0
+// @version         0.3.0
 // @author          roypriyanshu02
 // @github          https://github.com/roypriyanshu02
 // @homepage        https://github.com/roypriyanshu02/windhawk-auto-refresh-rate
@@ -294,6 +294,168 @@ constexpr DWORD QUIET_SWITCH_TIMEOUT_MS         = 2000;
 constexpr DWORD TIME_CHECK_INTERVAL_MS          = 30000;
 
 
+// ============================================================================
+// Display Mode Enumeration & Resolution
+// ============================================================================
+[[nodiscard]] DWORD ResolveRefreshRate(const WCHAR* pDevice, DWORD targetHz, const DEVMODEW& dmCurrent, std::vector<DWORD>& outRates) {
+    outRates.clear();
+    DEVMODEW dmEnum = {};
+    dmEnum.dmSize = sizeof(dmEnum);
+
+    DWORD exactMatch = 0, toleranceMatch = 0, closestMatch = 0;
+    int minDiff = 999999;
+
+    for (DWORD i = 0; EnumDisplaySettingsExW(pDevice, i, &dmEnum, EDS_ROTATEDMODE); ++i) {
+        if (dmEnum.dmPelsWidth == dmCurrent.dmPelsWidth &&
+            dmEnum.dmPelsHeight == dmCurrent.dmPelsHeight &&
+            dmEnum.dmBitsPerPel == dmCurrent.dmBitsPerPel) {
+
+            DWORD hz = dmEnum.dmDisplayFrequency;
+            if (std::find(outRates.begin(), outRates.end(), hz) == outRates.end()) {
+                outRates.push_back(hz);
+            }
+            if (targetHz > 1) {
+                if (hz == targetHz) {
+                    exactMatch = hz;
+                } else if (std::abs(static_cast<int>(hz) - static_cast<int>(targetHz)) <= 1 && toleranceMatch == 0) {
+                    toleranceMatch = hz;
+                }
+                int diff = std::abs(static_cast<int>(hz) - static_cast<int>(targetHz));
+                if (diff < minDiff) {
+                    minDiff = diff;
+                    closestMatch = hz;
+                }
+            }
+        }
+    }
+
+    std::sort(outRates.begin(), outRates.end());
+    std::vector<DWORD> dedup;
+    for (DWORD r : outRates) {
+        if (dedup.empty()) {
+            dedup.push_back(r);
+        } else {
+            DWORD prev = dedup.back();
+            if (std::abs(static_cast<int>(r) - static_cast<int>(prev)) <= 1) {
+                dedup.back() = std::max(prev, r);
+            } else {
+                dedup.push_back(r);
+            }
+        }
+    }
+    outRates = std::move(dedup);
+
+    if (outRates.empty()) return (targetHz > 1 ? targetHz : 60);
+
+    // targetHz == 0: Highest supported refresh rate
+    if (targetHz == 0) return outRates.back();
+
+    // targetHz == 1: Lowest supported refresh rate (usually 60 Hz)
+    if (targetHz == 1) return outRates.front();
+
+    if (exactMatch != 0) return exactMatch;
+    if (toleranceMatch != 0) return toleranceMatch;
+    if (closestMatch != 0) return closestMatch;
+    return outRates.back();
+}
+
+[[nodiscard]] std::wstring FormatRatesList(const std::vector<DWORD>& rates) {
+    std::wstring s;
+    for (size_t i = 0; i < rates.size(); ++i) {
+        if (i > 0) s += L", ";
+        s += std::to_wstring(rates[i]) + L"Hz";
+    }
+    return s;
+}
+
+[[nodiscard]] DWORD GetCurrentPrimaryRefreshRate() {
+    DEVMODEW dm = {};
+    dm.dmSize = sizeof(dm);
+    if (EnumDisplaySettingsExW(nullptr, ENUM_CURRENT_SETTINGS, &dm, EDS_ROTATEDMODE)) {
+        return dm.dmDisplayFrequency;
+    }
+    return 60;
+}
+
+[[nodiscard]] DWORD GetMaxRefreshRate(const WCHAR* pDevice = nullptr) {
+    DEVMODEW dm = {};
+    dm.dmSize = sizeof(dm);
+    if (!EnumDisplaySettingsExW(pDevice, ENUM_CURRENT_SETTINGS, &dm, EDS_ROTATEDMODE)) return 144;
+    std::vector<DWORD> rates;
+    return ResolveRefreshRate(pDevice, 0, dm, rates);
+}
+
+[[nodiscard]] DWORD GetMinRefreshRate(const WCHAR* pDevice = nullptr) {
+    DEVMODEW dm = {};
+    dm.dmSize = sizeof(dm);
+    if (!EnumDisplaySettingsExW(pDevice, ENUM_CURRENT_SETTINGS, &dm, EDS_ROTATEDMODE)) return 60;
+    std::vector<DWORD> rates;
+    return ResolveRefreshRate(pDevice, 1, dm, rates);
+}
+
+[[nodiscard]] std::optional<std::wstring> IsForegroundWindowFullscreen(const std::wstring& knownProc = L"") {
+    HWND hFore = GetForegroundWindow();
+    if (!hFore || !IsWindowVisible(hFore) || IsIconic(hFore)) return std::nullopt;
+
+    WCHAR szClass[128] = {};
+    GetClassNameW(hFore, szClass, 127);
+    if (_wcsicmp(szClass, L"Progman") == 0 ||
+        _wcsicmp(szClass, L"WorkerW") == 0 ||
+        _wcsicmp(szClass, L"Shell_TrayWnd") == 0 ||
+        _wcsicmp(szClass, L"Shell_SecondaryTrayWnd") == 0 ||
+        _wcsicmp(szClass, L"CabinetWClass") == 0 ||
+        _wcsicmp(szClass, L"TaskManagerWindow") == 0 ||
+        _wcsicmp(szClass, L"Windows.UI.Core.CoreWindow") == 0) {
+        return std::nullopt;
+    }
+
+    std::wstring proc = !knownProc.empty() ? knownProc : GetForegroundProcessName();
+    if (_wcsicmp(proc.c_str(), L"LockApp.exe") == 0 ||
+        _wcsicmp(proc.c_str(), L"LogonUI.exe") == 0 ||
+        _wcsicmp(proc.c_str(), L"SearchHost.exe") == 0 ||
+        _wcsicmp(proc.c_str(), L"explorer.exe") == 0 ||
+        _wcsicmp(proc.c_str(), L"StartMenuExperienceHost.exe") == 0) {
+        return std::nullopt;
+    }
+
+    HMONITOR hMon = MonitorFromWindow(hFore, MONITOR_DEFAULTTONEAREST);
+    if (!hMon) return std::nullopt;
+
+    MONITORINFO mi = { sizeof(mi) };
+    if (!GetMonitorInfoW(hMon, &mi)) return std::nullopt;
+
+    RECT rcWnd = {};
+    if (!GetWindowRect(hFore, &rcWnd)) return std::nullopt;
+
+    if (rcWnd.left <= mi.rcMonitor.left &&
+        rcWnd.top <= mi.rcMonitor.top &&
+        rcWnd.right >= mi.rcMonitor.right &&
+        rcWnd.bottom >= mi.rcMonitor.bottom) {
+
+        LONG style = GetWindowLongW(hFore, GWL_STYLE);
+        if ((style & WS_CAPTION) != WS_CAPTION || (style & WS_POPUP)) {
+            return proc;
+        }
+    }
+    return std::nullopt;
+}
+
+
+
+void ApplyRefreshRate(DWORD targetHz) {
+    DEVMODEW dm = {};
+    dm.dmSize = sizeof(dm);
+    if (EnumDisplaySettingsExW(nullptr, ENUM_CURRENT_SETTINGS, &dm, EDS_ROTATEDMODE)) {
+        if (dm.dmDisplayFrequency != targetHz) {
+            dm.dmDisplayFrequency = targetHz;
+            dm.dmFields = DM_DISPLAYFREQUENCY;
+            LONG res = ChangeDisplaySettingsExW(nullptr, &dm, nullptr, CDS_UPDATEREGISTRY, nullptr);
+            if (res == DISP_CHANGE_SUCCESSFUL) {
+                Wh_Log(L"Primary display frequency switched to %u Hz.", targetHz);
+            }
+        }
+    }
+}
 struct PowerStateSnapshot {
     bool isAC = true;
     BYTE batteryPercent = 100;
