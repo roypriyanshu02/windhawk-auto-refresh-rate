@@ -2,7 +2,7 @@
 // @id              auto-refresh-rate
 // @name            Auto Refresh Rate
 // @description     Automatically switch monitor refresh rates based on AC/battery power, fullscreen games, foreground apps, and docking.
-// @version         0.4.0
+// @version         0.5.0
 // @author          roypriyanshu02
 // @github          https://github.com/roypriyanshu02
 // @homepage        https://github.com/roypriyanshu02/windhawk-auto-refresh-rate
@@ -295,86 +295,76 @@ constexpr DWORD TIME_CHECK_INTERVAL_MS          = 30000;
 
 
 // ============================================================================
-// Internal vs external display detection
+// Process Tracking & Window Inspection Helpers
 // ============================================================================
 
-static std::vector<std::pair<std::wstring, bool>> s_internalDisplayCache;
-static bool s_internalCacheValid = false;
+[[nodiscard]] std::wstring GetProcessNameFromPID(DWORD pid) {
+    if (pid <= 4) return L"";
+    ScopedHandle hProc(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
+    if (!hProc) return L"";
 
-void InvalidateDisplayDeviceCache() noexcept {
-    s_internalCacheValid = false;
-    s_internalDisplayCache.clear();
+    WCHAR path[1024] = {};
+    DWORD size = static_cast<DWORD>(std::size(path));
+    if (QueryFullProcessImageNameW(hProc.get(), 0, path, &size)) {
+        const WCHAR* pSlash = wcsrchr(path, L'\\');
+        return pSlash ? (pSlash + 1) : path;
+    }
+    return L"";
 }
 
-[[nodiscard]] bool IsInternalDisplayDevice(const WCHAR* pDeviceName) {
-    std::wstring resolvedName;
-    if (!pDeviceName || !*pDeviceName) {
-        DISPLAY_DEVICEW dd = { sizeof(dd) };
-        for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &dd, 0); ++i) {
-            if ((dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) &&
-                (dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE)) {
-                resolvedName = dd.DeviceName;
-                pDeviceName = resolvedName.c_str();
-                break;
-            }
-        }
-        if (!pDeviceName || !*pDeviceName) return true;
-    }
+[[nodiscard]] std::wstring GetForegroundProcessName() {
+    HWND hFore = GetForegroundWindow();
+    if (!hFore) return L"";
 
-    if (s_internalCacheValid) {
-        for (const auto& entry : s_internalDisplayCache) {
-            if (_wcsicmp(entry.first.c_str(), pDeviceName) == 0) {
-                return entry.second;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hFore, &pid);
+    std::wstring procName = GetProcessNameFromPID(pid);
+
+    if (_wcsicmp(procName.c_str(), L"ApplicationFrameHost.exe") == 0) {
+        HWND hChild = FindWindowExW(hFore, nullptr, L"Windows.UI.Core.CoreWindow", nullptr);
+        if (hChild) {
+            DWORD childPid = 0;
+            GetWindowThreadProcessId(hChild, &childPid);
+            if (childPid != 0 && childPid != pid) {
+                std::wstring childProc = GetProcessNameFromPID(childPid);
+                if (!childProc.empty()) return childProc;
             }
         }
     }
-
-    UINT32 pathCount = 0, modeCount = 0;
-    std::vector<DISPLAYCONFIG_PATH_INFO> paths;
-    std::vector<DISPLAYCONFIG_MODE_INFO> modes;
-    LONG result = ERROR_SUCCESS;
-
-    for (int retry = 0; retry < 3; ++retry) {
-        if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount) != ERROR_SUCCESS || pathCount == 0) {
-            return false;
-        }
-        paths.resize(pathCount);
-        modes.resize(modeCount);
-        result = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(), &modeCount, modes.data(), nullptr);
-        if (result == ERROR_SUCCESS) break;
-        if (result != ERROR_INSUFFICIENT_BUFFER) return false;
-    }
-    if (result != ERROR_SUCCESS) return false;
-
-    bool isInternal = false;
-    for (UINT32 i = 0; i < pathCount; ++i) {
-        DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName = {};
-        sourceName.header.type = static_cast<DISPLAYCONFIG_DEVICE_INFO_TYPE>(DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME);
-        sourceName.header.size = sizeof(sourceName);
-        sourceName.header.adapterId = paths[i].sourceInfo.adapterId;
-        sourceName.header.id = paths[i].sourceInfo.id;
-
-        if (DisplayConfigGetDeviceInfo(&sourceName.header) == ERROR_SUCCESS) {
-            if (_wcsicmp(sourceName.viewGdiDeviceName, pDeviceName) == 0) {
-                UINT32 tech = paths[i].targetInfo.outputTechnology;
-                isInternal = (tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL ||
-                              tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED ||
-                              tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED ||
-                              tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS);
-                break;
-            }
-        }
-    }
-
-    s_internalCacheValid = true;
-    s_internalDisplayCache.emplace_back(pDeviceName, isInternal);
-    return isInternal;
+    return procName;
 }
 
+static ULONGLONG s_lastInhibitCheckTick = 0;
+static std::optional<std::wstring> s_cachedInhibitMatch;
 
-// ============================================================================
-// Display Mode Enumeration & Resolution
-// ============================================================================
+[[nodiscard]] std::optional<std::wstring> CheckAppInRunningList(const std::vector<std::wstring>& list) {
+    if (list.empty()) return std::nullopt;
+
+    ULONGLONG now = GetTickCount64();
+    if (s_lastInhibitCheckTick > 0 && (now - s_lastInhibitCheckTick < 4000)) {
+        return s_cachedInhibitMatch;
+    }
+    s_lastInhibitCheckTick = now;
+
+    ScopedHandle hSnapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
+    if (!hSnapshot) {
+        s_cachedInhibitMatch = std::nullopt;
+        return std::nullopt;
+    }
+
+    PROCESSENTRY32W pe = { sizeof(pe) };
+    if (Process32FirstW(hSnapshot.get(), &pe)) {
+        do {
+            if (IsAppInList(pe.szExeFile, list)) {
+                s_cachedInhibitMatch = pe.szExeFile;
+                return s_cachedInhibitMatch;
+            }
+        } while (Process32NextW(hSnapshot.get(), &pe));
+    }
+    s_cachedInhibitMatch = std::nullopt;
+    return std::nullopt;
+}
+
 [[nodiscard]] DWORD ResolveRefreshRate(const WCHAR* pDevice, DWORD targetHz, const DEVMODEW& dmCurrent, std::vector<DWORD>& outRates) {
     outRates.clear();
     DEVMODEW dmEnum = {};
@@ -518,6 +508,84 @@ void InvalidateDisplayDeviceCache() noexcept {
     return std::nullopt;
 }
 
+
+
+// ============================================================================
+// Internal vs external display detection
+// ============================================================================
+
+static std::vector<std::pair<std::wstring, bool>> s_internalDisplayCache;
+static bool s_internalCacheValid = false;
+
+void InvalidateDisplayDeviceCache() noexcept {
+    s_internalCacheValid = false;
+    s_internalDisplayCache.clear();
+}
+
+[[nodiscard]] bool IsInternalDisplayDevice(const WCHAR* pDeviceName) {
+    std::wstring resolvedName;
+    if (!pDeviceName || !*pDeviceName) {
+        DISPLAY_DEVICEW dd = { sizeof(dd) };
+        for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &dd, 0); ++i) {
+            if ((dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) &&
+                (dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE)) {
+                resolvedName = dd.DeviceName;
+                pDeviceName = resolvedName.c_str();
+                break;
+            }
+        }
+        if (!pDeviceName || !*pDeviceName) return true;
+    }
+
+    if (s_internalCacheValid) {
+        for (const auto& entry : s_internalDisplayCache) {
+            if (_wcsicmp(entry.first.c_str(), pDeviceName) == 0) {
+                return entry.second;
+            }
+        }
+    }
+
+    UINT32 pathCount = 0, modeCount = 0;
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+    LONG result = ERROR_SUCCESS;
+
+    for (int retry = 0; retry < 3; ++retry) {
+        if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount) != ERROR_SUCCESS || pathCount == 0) {
+            return false;
+        }
+        paths.resize(pathCount);
+        modes.resize(modeCount);
+        result = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(), &modeCount, modes.data(), nullptr);
+        if (result == ERROR_SUCCESS) break;
+        if (result != ERROR_INSUFFICIENT_BUFFER) return false;
+    }
+    if (result != ERROR_SUCCESS) return false;
+
+    bool isInternal = false;
+    for (UINT32 i = 0; i < pathCount; ++i) {
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName = {};
+        sourceName.header.type = static_cast<DISPLAYCONFIG_DEVICE_INFO_TYPE>(DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME);
+        sourceName.header.size = sizeof(sourceName);
+        sourceName.header.adapterId = paths[i].sourceInfo.adapterId;
+        sourceName.header.id = paths[i].sourceInfo.id;
+
+        if (DisplayConfigGetDeviceInfo(&sourceName.header) == ERROR_SUCCESS) {
+            if (_wcsicmp(sourceName.viewGdiDeviceName, pDeviceName) == 0) {
+                UINT32 tech = paths[i].targetInfo.outputTechnology;
+                isInternal = (tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL ||
+                              tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED ||
+                              tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED ||
+                              tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS);
+                break;
+            }
+        }
+    }
+
+    s_internalCacheValid = true;
+    s_internalDisplayCache.emplace_back(pDeviceName, isInternal);
+    return isInternal;
+}
 
 
 void ApplyRefreshRate(DWORD targetHz) {
