@@ -2,7 +2,7 @@
 // @id              auto-refresh-rate
 // @name            Auto Refresh Rate
 // @description     Automatically switch monitor refresh rates based on AC/battery power, fullscreen games, foreground apps, and docking.
-// @version         0.5.0
+// @version         0.6.0
 // @author          roypriyanshu02
 // @github          https://github.com/roypriyanshu02
 // @homepage        https://github.com/roypriyanshu02/windhawk-auto-refresh-rate
@@ -292,6 +292,280 @@ constexpr DWORD DISPLAY_CHANGE_DELAY_MS         = 500;
 constexpr DWORD FOREGROUND_DEBOUNCE_MS          = 100;
 constexpr DWORD QUIET_SWITCH_TIMEOUT_MS         = 2000;
 constexpr DWORD TIME_CHECK_INTERVAL_MS          = 30000;
+
+// ============================================================================
+// Mod Configuration & State
+// ============================================================================
+
+struct ModSettings {
+    bool chargeSwitchingEnabled = true;
+    DWORD targetAC = 0; // 0 = automatic maximum supported
+    DWORD targetDC = 60; // 1 = lowest, 0 = match AC, or explicit Hz
+
+    bool energySaverEnabled = true;
+    std::wstring energySaverAction = L"60"; // "60", "min", or "custom"
+    DWORD targetEnergySaver = 60; // if energySaverAction is custom
+
+    bool autoGameBoost = true;
+    bool appRulesEnabled = false;
+    std::wstring highRefreshApps = L"cs2; valorant; overwatch; cyberpunk2077; blender";
+    std::wstring lowRefreshApps = L"vlc; mpc-hc64; netflix; acrobat";
+    bool smartDockingEnabled = true;
+
+    bool quietSwitchEnabled = true;
+    bool inhibitAppsEnabled = true;
+    std::wstring inhibitApps = L"obs64; obs; streamlabs; powerpnt";
+    DWORD switchCooldownMs = 3000;
+
+    bool osdEnabled = true;
+    DWORD osdDurationMs = 1500;
+    bool globalHotkeyEnabled = false;
+    std::wstring globalHotkey = L"Win+Ctrl+R";
+    UINT hotkeyModifiers = MOD_WIN | MOD_CONTROL;
+    UINT hotkeyVk = 'R';
+
+    bool targetDisplayAll = false;
+    bool timeScheduleEnabled = false;
+    std::wstring scheduleStart = L"22:00";
+    std::wstring scheduleEnd = L"07:00";
+    bool verboseLogging = true;
+};
+
+struct PowerStateSnapshot {
+    bool isAC = true;
+    BYTE batteryPercent = 100;
+    bool isBatterySaverActive = false;
+    GUID powerScheme = GUID_NULL_LOCAL;
+};
+
+static ModSettings g_settings;
+static PowerStateSnapshot g_state;
+static std::vector<std::wstring> g_parsedHighRefreshApps;
+static std::vector<std::wstring> g_parsedLowRefreshApps;
+static std::vector<std::wstring> g_parsedInhibitApps;
+static ULONGLONG g_lastSuccessfulSwitchTick = 0;
+
+static HANDLE g_hMutex = nullptr;
+static HANDLE g_hThread = nullptr;
+static std::atomic<HWND> g_hWnd{nullptr};
+static HWND g_hOsdWnd = nullptr;
+static HWINEVENTHOOK g_hWinEventHook = nullptr;
+
+static constexpr std::array<const GUID*, 4> g_powerGuids = {
+    &GUID_ACDC_POWER_SOURCE_LOCAL,
+    &GUID_BATTERY_PERCENTAGE_REMAINING_LOCAL,
+    &GUID_POWER_SAVING_STATUS_LOCAL,
+    &GUID_POWERSCHEME_PERSONALITY_LOCAL
+};
+static std::array<HPOWERNOTIFY, 4> g_hPowerNotify = {};
+
+static constexpr WCHAR g_szClassName[] = L"Windhawk_AutoRefreshRate_MsgWnd";
+static constexpr WCHAR g_szOsdClassName[] = L"Windhawk_AutoRefreshRate_OsdWnd";
+static constexpr WCHAR g_szMutexName[] = L"Local\\Windhawk_AutoRefreshRate_PowerMonitor";
+
+static bool g_manualOverrideActive = false;
+static DWORD g_manualOverrideHz = 0;
+
+static DWORD g_osdCurrentHz = 0;
+static std::wstring g_osdCurrentReason;
+static BYTE g_osdAlpha = 0;
+
+enum class OsdState { Hidden, Holding, Fading };
+static OsdState g_osdState = OsdState::Hidden;
+static std::atomic<bool> g_foregroundPending{false};
+
+void SynchronizeAndApplyPolicy(bool forceOsd = false, const std::wstring& forcedBrief = L"");
+void ShowOsdBadge(DWORD hz, const std::wstring& reasonBrief);
+void LoadSettings();
+
+
+// ============================================================================
+// Internal vs external display detection
+// ============================================================================
+
+static std::vector<std::pair<std::wstring, bool>> s_internalDisplayCache;
+static bool s_internalCacheValid = false;
+
+void InvalidateDisplayDeviceCache() noexcept {
+    s_internalCacheValid = false;
+    s_internalDisplayCache.clear();
+}
+
+[[nodiscard]] bool IsInternalDisplayDevice(const WCHAR* pDeviceName) {
+    std::wstring resolvedName;
+    if (!pDeviceName || !*pDeviceName) {
+        DISPLAY_DEVICEW dd = { sizeof(dd) };
+        for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &dd, 0); ++i) {
+            if ((dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) &&
+                (dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE)) {
+                resolvedName = dd.DeviceName;
+                pDeviceName = resolvedName.c_str();
+                break;
+            }
+        }
+        if (!pDeviceName || !*pDeviceName) return true;
+    }
+
+    if (s_internalCacheValid) {
+        for (const auto& entry : s_internalDisplayCache) {
+            if (_wcsicmp(entry.first.c_str(), pDeviceName) == 0) {
+                return entry.second;
+            }
+        }
+    }
+
+    UINT32 pathCount = 0, modeCount = 0;
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+    LONG result = ERROR_SUCCESS;
+
+    for (int retry = 0; retry < 3; ++retry) {
+        if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount) != ERROR_SUCCESS || pathCount == 0) {
+            return false;
+        }
+        paths.resize(pathCount);
+        modes.resize(modeCount);
+        result = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(), &modeCount, modes.data(), nullptr);
+        if (result == ERROR_SUCCESS) break;
+        if (result != ERROR_INSUFFICIENT_BUFFER) return false;
+    }
+    if (result != ERROR_SUCCESS) return false;
+
+    bool isInternal = false;
+    for (UINT32 i = 0; i < pathCount; ++i) {
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName = {};
+        sourceName.header.type = static_cast<DISPLAYCONFIG_DEVICE_INFO_TYPE>(DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME);
+        sourceName.header.size = sizeof(sourceName);
+        sourceName.header.adapterId = paths[i].sourceInfo.adapterId;
+        sourceName.header.id = paths[i].sourceInfo.id;
+
+        if (DisplayConfigGetDeviceInfo(&sourceName.header) == ERROR_SUCCESS) {
+            if (_wcsicmp(sourceName.viewGdiDeviceName, pDeviceName) == 0) {
+                UINT32 tech = paths[i].targetInfo.outputTechnology;
+                isInternal = (tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL ||
+                              tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED ||
+                              tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED ||
+                              tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS);
+                break;
+            }
+        }
+    }
+
+    s_internalCacheValid = true;
+    s_internalDisplayCache.emplace_back(pDeviceName, isInternal);
+    return isInternal;
+}
+
+
+// ============================================================================
+// Target refresh rate evaluation policy
+// ============================================================================
+
+[[nodiscard]] DWORD EvaluateTargetRefreshRate(const PowerStateSnapshot& state, std::wstring& outReason, std::wstring& outBrief) {
+    // 1. Manual hotkey lock
+    if (g_manualOverrideActive && g_manualOverrideHz > 0) {
+        outBrief = L"Manual lock";
+        outReason = L"Manual hotkey lock active (" + std::to_wstring(g_manualOverrideHz) + L" Hz)";
+        return g_manualOverrideHz;
+    }
+
+    // 2. Protected applications
+    if (g_settings.inhibitAppsEnabled) {
+        std::wstring foreProc = GetForegroundProcessName();
+        if (!foreProc.empty() && IsAppInList(foreProc, g_parsedInhibitApps)) {
+            DWORD currentHz = GetCurrentPrimaryRefreshRate();
+            outBrief = L"Protected: " + FormatAppNameForDisplay(foreProc);
+            outReason = L"Protected app in focus ('" + foreProc + L"'), maintaining " + std::to_wstring(currentHz) + L" Hz";
+            return currentHz;
+        }
+
+        auto matchedInhibit = CheckAppInRunningList(g_parsedInhibitApps);
+        if (matchedInhibit) {
+            DWORD currentHz = GetCurrentPrimaryRefreshRate();
+            outBrief = L"Protected: " + FormatAppNameForDisplay(*matchedInhibit);
+            outReason = L"Protected app running ('" + *matchedInhibit + L"'), maintaining " + std::to_wstring(currentHz) + L" Hz";
+            return currentHz;
+        }
+    }
+
+    DWORD resolvedAC = (g_settings.targetAC == 0) ? GetMaxRefreshRate() : g_settings.targetAC;
+    DWORD resolvedDC = (g_settings.targetDC == 1) ? GetMinRefreshRate() : ((g_settings.targetDC == 0) ? resolvedAC : g_settings.targetDC);
+
+    // 3. Windows Energy Saver
+    if (g_settings.energySaverEnabled && state.isBatterySaverActive && g_settings.energySaverAction != L"ignore") {
+        DWORD resolvedSaver = 60;
+        if (g_settings.energySaverAction == L"min") {
+            resolvedSaver = GetMinRefreshRate();
+        } else if (g_settings.energySaverAction == L"custom") {
+            resolvedSaver = (g_settings.targetEnergySaver >= 30) ? g_settings.targetEnergySaver : 60;
+        }
+        outBrief = L"Energy saver";
+        outReason = L"Windows Energy Saver active (" + std::to_wstring(resolvedSaver) + L" Hz)";
+        return resolvedSaver;
+    }
+
+    // Windows 11 Power Mode slider (Best Performance boost)
+    if (g_settings.chargeSwitchingEnabled && !state.isAC && IsEqualGUID(state.powerScheme, GUID_MIN_POWER_SAVINGS_LOCAL)) {
+        outBrief = L"Best performance";
+        outReason = L"Windows Power Mode: Best Performance (" + std::to_wstring(resolvedAC) + L" Hz)";
+        return resolvedAC;
+    }
+
+    // 4. Foreground application rules
+    std::wstring foreProc;
+    if (g_settings.appRulesEnabled || g_settings.autoGameBoost) {
+        foreProc = GetForegroundProcessName();
+    }
+
+    if (g_settings.appRulesEnabled && !foreProc.empty()) {
+        if (IsAppInList(foreProc, g_parsedLowRefreshApps)) {
+            outBrief = L"App saver: " + FormatAppNameForDisplay(foreProc);
+            outReason = L"Low-refresh app in focus ('" + foreProc + L"' -> " + std::to_wstring(resolvedDC) + L" Hz)";
+            return resolvedDC;
+        } else if (IsAppInList(foreProc, g_parsedHighRefreshApps)) {
+            outBrief = L"App boost: " + FormatAppNameForDisplay(foreProc);
+            outReason = L"High-refresh app in focus ('" + foreProc + L"' -> " + std::to_wstring(resolvedAC) + L" Hz)";
+            return resolvedAC;
+        }
+    }
+
+    // Fullscreen game boost
+    if (g_settings.autoGameBoost) {
+        auto fsProc = IsForegroundWindowFullscreen(foreProc);
+        if (fsProc) {
+            std::wstring gameName = fsProc->empty() ? L"Fullscreen" : *fsProc;
+            outBrief = L"Game: " + FormatAppNameForDisplay(gameName);
+            outReason = L"Fullscreen game detected ('" + gameName + L"' -> " + std::to_wstring(resolvedAC) + L" Hz)";
+            return resolvedAC;
+        }
+    }
+
+    // 5. Night schedule
+    if (g_settings.timeScheduleEnabled) {
+        if (IsCurrentTimeInSchedule(g_settings.scheduleStart, g_settings.scheduleEnd)) {
+            outBrief = L"Night schedule";
+            outReason = L"Night schedule active (" + std::to_wstring(resolvedDC) + L" Hz)";
+            return resolvedDC;
+        }
+    }
+
+    // 6. Power source baseline (AC vs battery)
+    if (g_settings.chargeSwitchingEnabled) {
+        if (state.isAC) {
+            outBrief = L"Plugged in";
+            outReason = L"AC power connected (" + std::to_wstring(resolvedAC) + L" Hz)";
+            return resolvedAC;
+        } else {
+            outBrief = L"Battery (" + std::to_wstring(state.batteryPercent) + L"%)";
+            outReason = L"Battery power (" + std::to_wstring(resolvedDC) + L" Hz, " + std::to_wstring(state.batteryPercent) + L"% remaining)";
+            return resolvedDC;
+        }
+    }
+
+    outBrief = L"Active";
+    outReason = L"Power rules inactive, keeping current rate (" + std::to_wstring(GetCurrentPrimaryRefreshRate()) + L" Hz)";
+    return GetCurrentPrimaryRefreshRate();
+}
 
 
 // ============================================================================
