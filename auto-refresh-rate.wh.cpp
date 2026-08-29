@@ -2,7 +2,7 @@
 // @id              auto-refresh-rate
 // @name            Auto Refresh Rate
 // @description     Automatically switch monitor refresh rates based on AC/battery power, fullscreen games, foreground apps, and docking.
-// @version         0.6.0
+// @version         0.7.0
 // @author          roypriyanshu02
 // @github          https://github.com/roypriyanshu02
 // @homepage        https://github.com/roypriyanshu02/windhawk-auto-refresh-rate
@@ -377,6 +377,257 @@ static std::atomic<bool> g_foregroundPending{false};
 void SynchronizeAndApplyPolicy(bool forceOsd = false, const std::wstring& forcedBrief = L"");
 void ShowOsdBadge(DWORD hz, const std::wstring& reasonBrief);
 void LoadSettings();
+
+
+// ============================================================================
+// On-screen display badge
+// ============================================================================
+
+typedef UINT (WINAPI *PFN_GetDpiForWindow)(HWND);
+
+[[nodiscard]] float GetOsdDpiScale(HWND hWnd) {
+    static PFN_GetDpiForWindow pfn = nullptr;
+    static bool s_inited = false;
+    if (!s_inited) {
+        HMODULE hUser = GetModuleHandleW(L"user32.dll");
+        if (hUser) {
+            pfn = reinterpret_cast<PFN_GetDpiForWindow>(GetProcAddress(hUser, "GetDpiForWindow"));
+        }
+        s_inited = true;
+    }
+    if (pfn && hWnd) {
+        const UINT dpi = pfn(hWnd);
+        if (dpi > 0) return static_cast<float>(dpi) / 96.0f;
+    }
+    return 1.0f;
+}
+
+static HFONT s_hOsdFontHz = nullptr;
+static HFONT s_hOsdFontSub = nullptr;
+static float s_osdFontScale = 0.0f;
+
+void CleanupOsdFonts() noexcept {
+    if (s_hOsdFontHz) {
+        DeleteObject(s_hOsdFontHz);
+        s_hOsdFontHz = nullptr;
+    }
+    if (s_hOsdFontSub) {
+        DeleteObject(s_hOsdFontSub);
+        s_hOsdFontSub = nullptr;
+    }
+    s_osdFontScale = 0.0f;
+}
+
+void EnsureOsdFonts(float scale) noexcept {
+    if (s_hOsdFontHz && s_hOsdFontSub && std::abs(s_osdFontScale - scale) < 0.001f) {
+        return;
+    }
+    CleanupOsdFonts();
+    s_osdFontScale = scale;
+    s_hOsdFontHz = CreateFontW(static_cast<int>(20.0f * scale), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Display");
+    s_hOsdFontSub = CreateFontW(static_cast<int>(13.0f * scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Text");
+}
+
+LRESULT CALLBACK OsdWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    switch (uMsg) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps = {};
+        HDC hdc = BeginPaint(hWnd, &ps);
+        if (!hdc) return 0;
+
+        RECT rc = {};
+        GetClientRect(hWnd, &rc);
+        const float scale = GetOsdDpiScale(hWnd);
+
+        HDC memDC = CreateCompatibleDC(hdc);
+        if (memDC) {
+            HBITMAP memBmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+            if (memBmp) {
+                HBITMAP hOldBmp = static_cast<HBITMAP>(SelectObject(memDC, memBmp));
+                {
+                    ScopedDcState dcSaver(memDC);
+
+                    {
+                        ScopedGdiObject hBgBrush(CreateSolidBrush(RGB(24, 24, 27)));
+                        ScopedGdiObject hBorderPen(CreatePen(PS_SOLID, 1, RGB(63, 63, 70)));
+                        ScopedDcState bgSaver(memDC);
+                        SelectObject(memDC, hBgBrush.get());
+                        SelectObject(memDC, hBorderPen.get());
+
+                        const int roundCorner = static_cast<int>(24.0f * scale);
+                        RoundRect(memDC, rc.left, rc.top, rc.right, rc.bottom, roundCorner, roundCorner);
+                    }
+
+                    {
+                        const COLORREF accentColor = (g_osdCurrentHz >= 100) ? RGB(59, 130, 246) : RGB(16, 185, 129);
+                        ScopedGdiObject hAccentBrush(CreateSolidBrush(accentColor));
+                        ScopedGdiObject hAccentPen(CreatePen(PS_SOLID, 1, accentColor));
+                        ScopedDcState dotSaver(memDC);
+                        SelectObject(memDC, hAccentBrush.get());
+                        SelectObject(memDC, hAccentPen.get());
+
+                        const int dotLeft = static_cast<int>(14.0f * scale);
+                        const int dotTop = static_cast<int>(17.0f * scale);
+                        const int dotSize = static_cast<int>(12.0f * scale);
+                        Ellipse(memDC, dotLeft, dotTop, dotLeft + dotSize, dotTop + dotSize);
+                    }
+
+                    SetBkMode(memDC, TRANSPARENT);
+                    EnsureOsdFonts(scale);
+
+                    if (s_hOsdFontHz) {
+                        ScopedDcState fontSaver(memDC);
+                        SelectObject(memDC, s_hOsdFontHz);
+                        SetTextColor(memDC, RGB(244, 244, 245));
+
+                        const std::wstring hzText = std::to_wstring(g_osdCurrentHz) + L" Hz";
+                        const int hzX = static_cast<int>(34.0f * scale);
+                        const int hzY = static_cast<int>(13.0f * scale);
+                        TextOutW(memDC, hzX, hzY, hzText.c_str(), static_cast<int>(hzText.length()));
+
+                        SIZE hzSize = {};
+                        GetTextExtentPoint32W(memDC, hzText.c_str(), static_cast<int>(hzText.length()), &hzSize);
+
+                        if (s_hOsdFontSub) {
+                            ScopedDcState subFontSaver(memDC);
+                            SelectObject(memDC, s_hOsdFontSub);
+                            SetTextColor(memDC, RGB(161, 161, 170));
+                            TextOutW(memDC, hzX + hzSize.cx + static_cast<int>(14.0f * scale), static_cast<int>(17.0f * scale),
+                                     g_osdCurrentReason.c_str(), static_cast<int>(g_osdCurrentReason.length()));
+                        }
+                    }
+
+                    BitBlt(hdc, 0, 0, rc.right, rc.bottom, memDC, 0, 0, SRCCOPY);
+                }
+                SelectObject(memDC, hOldBmp);
+                DeleteObject(memBmp);
+            }
+            DeleteDC(memDC);
+        }
+
+        EndPaint(hWnd, &ps);
+        return 0;
+    }
+
+    case WM_ERASEBKGND:
+        return 1;
+
+    case WM_MOUSEACTIVATE:
+        return MA_NOACTIVATE;
+
+    case WM_NCHITTEST:
+        return HTTRANSPARENT;
+
+    case WM_TIMER:
+        if (wParam == TIMER_ID_OSD_HOLD) {
+            if (g_osdState != OsdState::Holding) return 0;
+            KillTimer(hWnd, TIMER_ID_OSD_HOLD);
+            g_osdState = OsdState::Fading;
+            SetTimer(hWnd, TIMER_ID_OSD_FADE, 20, nullptr);
+            return 0;
+        } else if (wParam == TIMER_ID_OSD_FADE) {
+            if (g_osdState != OsdState::Fading) return 0;
+            if (g_osdAlpha > 20) {
+                g_osdAlpha -= 20;
+                SetLayeredWindowAttributes(hWnd, 0, g_osdAlpha, LWA_ALPHA);
+            } else {
+                KillTimer(hWnd, TIMER_ID_OSD_FADE);
+                g_osdState = OsdState::Hidden;
+                g_osdAlpha = 0;
+                ShowWindow(hWnd, SW_HIDE);
+            }
+            return 0;
+        }
+        break;
+
+    case WM_DESTROY:
+        KillTimer(hWnd, TIMER_ID_OSD_HOLD);
+        KillTimer(hWnd, TIMER_ID_OSD_FADE);
+        CleanupOsdFonts();
+        g_osdState = OsdState::Hidden;
+        g_hOsdWnd = nullptr;
+        return 0;
+    }
+
+    return DefWindowProcW(hWnd, uMsg, wParam, lParam);
+}
+
+void InitializeOsdWindow(HINSTANCE hInstance) {
+    WNDCLASSEXW wc = { sizeof(wc) };
+    wc.lpfnWndProc = OsdWndProc;
+    wc.hInstance = hInstance;
+    wc.lpszClassName = g_szOsdClassName;
+    RegisterClassExW(&wc);
+
+    HWND hOsd = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        g_szOsdClassName, L"AutoRefreshRateOsdWindow", WS_POPUP, 0, 0, 260, 48, nullptr, nullptr, hInstance, nullptr);
+
+    if (hOsd) {
+        g_hOsdWnd = hOsd;
+        SetLayeredWindowAttributes(hOsd, 0, 0, LWA_ALPHA);
+        ShowWindow(hOsd, SW_HIDE);
+    }
+}
+
+void ShowOsdBadge(DWORD hz, const std::wstring& reasonBrief) {
+    if (!g_settings.osdEnabled || !g_hOsdWnd) return;
+
+    g_osdCurrentHz = hz;
+    g_osdCurrentReason = reasonBrief;
+
+    float scale = GetOsdDpiScale(g_hOsdWnd);
+    int baseWidth = 240;
+    int approx = static_cast<int>(reasonBrief.length());
+    if (approx > 14) baseWidth += (approx - 14) * 8;
+
+    int width = static_cast<int>(baseWidth * scale);
+    int height = static_cast<int>(48 * scale);
+
+    static HWND s_lastOsdHwnd = nullptr;
+    static int s_lastWidth = 0;
+    static int s_lastHeight = 0;
+    if (g_hOsdWnd != s_lastOsdHwnd || width != s_lastWidth || height != s_lastHeight) {
+        s_lastOsdHwnd = g_hOsdWnd;
+        s_lastWidth = width;
+        s_lastHeight = height;
+        int roundCorner = static_cast<int>(24 * scale);
+        HRGN hRgn = CreateRoundRectRgn(0, 0, width + 1, height + 1, roundCorner, roundCorner);
+        if (hRgn) {
+            if (!SetWindowRgn(g_hOsdWnd, hRgn, FALSE)) {
+                DeleteObject(hRgn);
+            }
+        }
+    }
+
+    RECT rcWork = {};
+    POINT ptOrigin = { 0, 0 };
+    HMONITOR hMon = MonitorFromPoint(ptOrigin, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO mi = { sizeof(mi) };
+    if (hMon && GetMonitorInfoW(hMon, &mi)) {
+        rcWork = mi.rcWork;
+    } else {
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &rcWork, 0);
+    }
+
+    int margin = static_cast<int>(24 * scale);
+    int x = rcWork.right - width - margin;
+    int y = rcWork.top + margin;
+
+    KillTimer(g_hOsdWnd, TIMER_ID_OSD_HOLD);
+    KillTimer(g_hOsdWnd, TIMER_ID_OSD_FADE);
+
+    g_osdState = OsdState::Holding;
+    g_osdAlpha = 240;
+    SetLayeredWindowAttributes(g_hOsdWnd, 0, g_osdAlpha, LWA_ALPHA);
+    SetWindowPos(g_hOsdWnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    InvalidateRect(g_hOsdWnd, nullptr, TRUE);
+    UpdateWindow(g_hOsdWnd);
+
+    SetTimer(g_hOsdWnd, TIMER_ID_OSD_HOLD, g_settings.osdDurationMs, nullptr);
+}
 
 
 // ============================================================================
