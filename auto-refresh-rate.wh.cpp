@@ -2,7 +2,7 @@
 // @id              auto-refresh-rate
 // @name            Auto Refresh Rate
 // @description     Automatically switch monitor refresh rates based on AC/battery power, fullscreen games, foreground apps, and docking.
-// @version         0.6.0
+// @version         0.7.0
 // @author          roypriyanshu02
 // @github          https://github.com/roypriyanshu02
 // @homepage        https://github.com/roypriyanshu02/windhawk-auto-refresh-rate
@@ -10,7 +10,7 @@
 // @architecture    x86-64
 // @architecture    arm64
 // @architecture    x86
-// @compilerOptions -std=c++20 -lole32 -lgdi32 -luuid -luser32 -ladvapi32 -lpowrprof
+// @compilerOptions -std=c++20 -lole32 -lgdi32 -luuid -luser32 -ladvapi32 -lpowrprof -lshell32
 // @license         MIT
 // ==/WindhawkMod==
 
@@ -42,7 +42,7 @@ _Tip: To test immediately without unplugging power, toggle Windows Energy Saver 
 * **Smart laptop docking:** When running on battery with external monitors connected, lowers only the built-in laptop screen while keeping desktop monitors at full refresh rate.
 * **Quiet transitions:** Waits for keyboard and mouse activity to rest before lowering refresh rates, with an anti-flicker cooldown between switches.
 * **Night schedule:** Enforces battery refresh rates during designated night hours to reduce eye strain.
-* **On-screen display badge:** Click-through layered notification confirms rate changes without stealing window focus; includes DPI scaling support.
+* **Native Notifications:** Windows notification banner confirms rate changes and logs them to the Notification Center.
 * **Global cycle hotkey:** Step sequentially through each supported display frequency before wrapping back to auto mode (`Win + Ctrl + R`; disabled by default, enable under Settings).
 
 ## Evaluation priority
@@ -179,9 +179,9 @@ For bug reports, feature requests, and source code, visit the **[GitHub reposito
   $description: "Target display selection, laptop docking, and transition timing."
 
 - ShortcutsAndNotifications:
-    - OsdBadgeEnabled: true
-      $name: "On-screen notification badge"
-      $description: "Show a temporary on-screen badge when the refresh rate changes."
+    - NotificationEnabled: true
+      $name: "Windows notifications"
+      $description: "Show a native Windows notification banner when the refresh rate changes."
     - GlobalHotkeyEnabled: false
       $name: "Cycle hotkey"
       $description: "Cycle through supported refresh rates or return to auto mode via hotkey."
@@ -204,6 +204,7 @@ For bug reports, feature requests, and source code, visit the **[GitHub reposito
 #endif
 
 #include <windows.h>
+#include <shellapi.h>
 #include <objbase.h>
 #include <winuser.h>
 #include <powrprof.h>
@@ -273,6 +274,7 @@ static constexpr GUID GUID_OVERLAY_BEST_PERFORMANCE = {
 constexpr UINT WM_APP_REAPPLY_POWER_STATE   = WM_APP + 101;
 constexpr UINT WM_APP_FOREGROUND_CHANGED    = WM_APP + 102;
 constexpr UINT WM_APP_SETTINGS_CHANGED      = WM_APP + 103;
+constexpr UINT WM_APP_TRAY_NOTIFY           = WM_APP + 104;
 
 constexpr UINT_PTR TIMER_ID_POWER_DEBOUNCE      = 1;
 constexpr UINT_PTR TIMER_ID_RESUME_SYNC         = 2;
@@ -282,8 +284,6 @@ constexpr UINT_PTR TIMER_ID_FOREGROUND_DEBOUNCE = 6;
 constexpr UINT_PTR TIMER_ID_QUIET_SWITCH        = 7;
 constexpr UINT_PTR TIMER_ID_COOLDOWN_SWITCH     = 8;
 
-constexpr UINT_PTR TIMER_ID_OSD_HOLD            = 101;
-constexpr UINT_PTR TIMER_ID_OSD_FADE            = 102;
 
 constexpr int HOTKEY_ID_CYCLE                   = 0x415A;
 
@@ -319,8 +319,7 @@ struct ModSettings {
     std::wstring inhibitApps = L"obs64; obs; streamlabs; powerpnt";
     DWORD switchCooldownMs = 3000;
 
-    bool osdEnabled = true;
-    DWORD osdDurationMs = 1500;
+    bool notificationEnabled = true;
     bool globalHotkeyEnabled = false;
     std::wstring globalHotkey = L"Win+Ctrl+R";
     UINT hotkeyModifiers = MOD_WIN | MOD_CONTROL;
@@ -350,7 +349,6 @@ static ULONGLONG g_lastSuccessfulSwitchTick = 0;
 static HANDLE g_hMutex = nullptr;
 static HANDLE g_hThread = nullptr;
 static std::atomic<HWND> g_hWnd{nullptr};
-static HWND g_hOsdWnd = nullptr;
 static HWINEVENTHOOK g_hWinEventHook = nullptr;
 
 static constexpr std::array<const GUID*, 4> g_powerGuids = {
@@ -362,25 +360,79 @@ static constexpr std::array<const GUID*, 4> g_powerGuids = {
 static std::array<HPOWERNOTIFY, 4> g_hPowerNotify = {};
 
 static constexpr WCHAR g_szClassName[] = L"Windhawk_AutoRefreshRate_MsgWnd";
-static constexpr WCHAR g_szOsdClassName[] = L"Windhawk_AutoRefreshRate_OsdWnd";
 static constexpr WCHAR g_szMutexName[] = L"Local\\Windhawk_AutoRefreshRate_PowerMonitor";
 
 static bool g_manualOverrideActive = false;
 static DWORD g_manualOverrideHz = 0;
 
-static DWORD g_osdCurrentHz = 0;
-static std::wstring g_osdCurrentReason;
-static BYTE g_osdAlpha = 0;
+static std::atomic<bool> s_trayIconActive{false};
 
-enum class OsdState { Hidden, Holding, Fading };
-static OsdState g_osdState = OsdState::Hidden;
+
 static std::atomic<bool> g_foregroundPending{false};
 
-void SynchronizeAndApplyPolicy(bool forceOsd = false, const std::wstring& forcedBrief = L"");
-void ShowOsdBadge(DWORD hz, const std::wstring& reasonBrief);
+void SynchronizeAndApplyPolicy(bool forceNotification = false, const std::wstring& forcedBrief = L"");
+void ShowNativeNotification(DWORD hz, const std::wstring& reasonBrief);
+void RemoveNativeNotificationIcon() noexcept;
 void LoadSettings();
 
 
+// ============================================================================
+// Windows Native Notifications
+// ============================================================================
+
+constexpr UINT TRAY_ICON_ID = 1001;
+
+void RemoveNativeNotificationIcon() noexcept {
+    if (!s_trayIconActive.load(std::memory_order_relaxed)) return;
+    HWND hWnd = g_hWnd.load(std::memory_order_relaxed);
+    if (hWnd) {
+        NOTIFYICONDATAW nid = { sizeof(nid) };
+        nid.hWnd = hWnd;
+        nid.uID = TRAY_ICON_ID;
+        Shell_NotifyIconW(NIM_DELETE, &nid);
+    }
+    s_trayIconActive.store(false, std::memory_order_relaxed);
+}
+
+void ShowNativeNotification(DWORD hz, const std::wstring& reasonBrief) {
+    if (!g_settings.notificationEnabled) return;
+    HWND hWnd = g_hWnd.load(std::memory_order_relaxed);
+    if (!hWnd) return;
+
+    std::wstring tip = L"Auto Refresh Rate (" + std::to_wstring(hz) + L" Hz)";
+    std::wstring title = L"Refresh Rate: " + std::to_wstring(hz) + L" Hz";
+    std::wstring info = reasonBrief.empty() ? L"Display refresh rate adjusted." : reasonBrief;
+
+    if (!s_trayIconActive.load(std::memory_order_relaxed)) {
+        NOTIFYICONDATAW addNid = { sizeof(addNid) };
+        addNid.hWnd = hWnd;
+        addNid.uID = TRAY_ICON_ID;
+        addNid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        addNid.uCallbackMessage = WM_APP_TRAY_NOTIFY;
+        addNid.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+        wcsncpy_s(addNid.szTip, tip.c_str(), _TRUNCATE);
+
+        if (Shell_NotifyIconW(NIM_ADD, &addNid)) {
+            s_trayIconActive.store(true, std::memory_order_relaxed);
+            addNid.uVersion = NOTIFYICON_VERSION_4;
+            Shell_NotifyIconW(NIM_SETVERSION, &addNid);
+        }
+    }
+
+    if (s_trayIconActive.load(std::memory_order_relaxed)) {
+        NOTIFYICONDATAW modNid = { sizeof(modNid) };
+        modNid.hWnd = hWnd;
+        modNid.uID = TRAY_ICON_ID;
+        modNid.uFlags = NIF_INFO | NIF_TIP;
+        wcsncpy_s(modNid.szTip, tip.c_str(), _TRUNCATE);
+        wcsncpy_s(modNid.szInfoTitle, title.c_str(), _TRUNCATE);
+        wcsncpy_s(modNid.szInfo, info.c_str(), _TRUNCATE);
+        modNid.dwInfoFlags = NIIF_INFO;
+
+        Shell_NotifyIconW(NIM_MODIFY, &modNid);
+        SetTimer(hWnd, TIMER_ID_TRAY_CLEANUP, TRAY_ICON_LIFETIME_MS, nullptr);
+    }
+}
 // ============================================================================
 // Internal vs external display detection
 // ============================================================================
