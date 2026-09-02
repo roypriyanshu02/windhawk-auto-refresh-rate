@@ -2,7 +2,7 @@
 // @id              auto-refresh-rate
 // @name            Auto Refresh Rate
 // @description     Automatically switch monitor refresh rates based on AC/battery power, fullscreen games, foreground apps, and docking.
-// @version         0.7.0
+// @version         0.8.0
 // @author          roypriyanshu02
 // @github          https://github.com/roypriyanshu02
 // @homepage        https://github.com/roypriyanshu02/windhawk-auto-refresh-rate
@@ -80,6 +80,121 @@ When multiple conditions match simultaneously, target refresh rates resolve in t
 For bug reports, feature requests, and source code, visit the **[GitHub repository](https://github.com/roypriyanshu02/windhawk-auto-refresh-rate)**.
 */
 // ==/WindhawkModReadme==
+
+// ==WindhawkModSettings==
+/*
+- PowerAndBattery:
+    - ChargeSwitchingEnabled: true
+      $name: "Power source switching"
+      $description: "Switch refresh rates when connecting or disconnecting power."
+    - PluggedInRate: max
+      $name: "Plugged-in rate"
+      $description: "Refresh rate when connected to AC power."
+      $options:
+        - max: "Highest supported (recommended)"
+        - "60": "60 Hz"
+        - custom: "Custom rate"
+    - CustomPluggedInRate: 144
+      $name: "Custom plugged-in rate"
+      $description: "Target refresh rate in Hz."
+    - OnBatteryRate: "60"
+      $name: "On-battery rate"
+      $description: "Refresh rate while running on battery."
+      $options:
+        - "60": "60 Hz (recommended)"
+        - min: "Lowest supported"
+        - match_ac: "Match plugged-in rate"
+        - custom: "Custom rate"
+    - CustomBatteryRate: 60
+      $name: "Custom on-battery rate"
+      $description: "Target refresh rate in Hz."
+    - EnergySaverEnabled: true
+      $name: "Energy Saver sync"
+      $description: "Lower refresh rate while Windows Energy Saver is active."
+    - EnergySaverRate: "60"
+      $name: "Energy Saver rate"
+      $description: "Refresh rate while Energy Saver is active."
+      $options:
+        - "60": "60 Hz (recommended)"
+        - min: "Lowest supported"
+        - custom: "Custom rate"
+    - CustomEnergySaverRate: 60
+      $name: "Custom Energy Saver rate"
+      $description: "Target refresh rate in Hz."
+  $name: "Power & battery"
+  $description: "Refresh rate automation for AC power, battery, and Windows Energy Saver."
+
+- GamingAndApps:
+    - AutoGameBoost: true
+      $name: "Fullscreen game boost"
+      $description: "Boost to highest supported refresh rate in borderless and fullscreen games."
+    - AppRulesEnabled: false
+      $name: "Per-app refresh rates"
+      $description: "Apply custom refresh rates when designated apps are focused."
+    - HighRefreshApps: "cs2; valorant; overwatch; cyberpunk2077; blender"
+      $name: "High-refresh apps"
+      $description: "Apps that boost to maximum refresh rate when focused. Separate names with semicolons (e.g. cs2; blender)."
+    - LowRefreshApps: "vlc; mpc-hc64; netflix; acrobat"
+      $name: "Low-refresh apps"
+      $description: "Apps locked to battery refresh rate when focused. Separate names with semicolons (e.g. vlc; acrobat)."
+    - InhibitAppsEnabled: true
+      $name: "Protected apps lock"
+      $description: "Pause display switching while capture or presentation tools run."
+    - InhibitApps: "obs64; obs; streamlabs; powerpnt"
+      $name: "Protected apps"
+      $description: "Apps that block refresh rate changes while running. Separate names with semicolons (e.g. obs64; powerpnt)."
+  $name: "Gaming & applications"
+  $description: "Fullscreen game boost, per-app rules, and screen capture protection."
+
+- Schedule:
+    - TimeScheduleEnabled: false
+      $name: "Night schedule"
+      $description: "Lower refresh rate during scheduled hours to reduce eye strain."
+    - ScheduleStart: "22:00"
+      $name: "Start time"
+      $description: "Schedule start time in 24h or 12h format (e.g. 22:00 or 10:00 PM)."
+    - ScheduleEnd: "07:00"
+      $name: "End time"
+      $description: "Schedule end time in 24h or 12h format (e.g. 07:00 or 7:00 AM)."
+  $name: "Night schedule"
+  $description: "Scheduled refresh rate limits for late night hours."
+
+- DisplayAndTransitions:
+    - TargetDisplays: primary
+      $name: "Target displays"
+      $description: "Displays to adjust when switching refresh rates."
+      $options:
+        - primary: "Primary display only"
+        - all: "All connected displays"
+    - SmartDockingEnabled: true
+      $name: "Smart laptop docking"
+      $description: "Keep external monitors at high refresh rate while lowering only the internal laptop screen on battery."
+    - QuietSwitchEnabled: true
+      $name: "Idle-only switching"
+      $description: "Wait for keyboard and mouse input to pause before lowering refresh rate."
+    - AntiFlickerCooldown: 3
+      $name: "Anti-flicker cooldown"
+      $description: "Minimum seconds to wait between display switches to avoid rapid panel flashing."
+  $name: "Display & transitions"
+  $description: "Target display selection, laptop docking, and transition timing."
+
+- ShortcutsAndNotifications:
+    - OsdBadgeEnabled: true
+      $name: "On-screen notification badge"
+      $description: "Show a temporary on-screen badge when the refresh rate changes."
+    - GlobalHotkeyEnabled: false
+      $name: "Cycle hotkey"
+      $description: "Cycle through supported refresh rates or return to auto mode via hotkey."
+    - GlobalHotkey: "Win+Ctrl+R"
+      $name: "Hotkey combination"
+      $description: "Key combination to cycle rates (e.g. Win+Ctrl+R, Ctrl+Alt+R)."
+    - VerboseLogging: true
+      $name: "Verbose event logging"
+      $description: "Log power transitions and refresh rate events to the Windhawk log."
+  $name: "Shortcuts & notifications"
+  $description: "On-screen badge, keyboard shortcuts, and event logging."
+*/
+// ==/WindhawkModSettings==
 
 // ==WindhawkModSettings==
 /*
@@ -377,6 +492,300 @@ static std::atomic<bool> g_foregroundPending{false};
 void SynchronizeAndApplyPolicy(bool forceOsd = false, const std::wstring& forcedBrief = L"");
 void ShowOsdBadge(DWORD hz, const std::wstring& reasonBrief);
 void LoadSettings();
+
+// ============================================================================
+// Settings & String Helpers
+// ============================================================================
+
+[[nodiscard]] inline int ReadIntSettingSafe(PCWSTR key, int defaultValue = 0) {
+    PCWSTR s = Wh_GetStringSetting(key);
+    if (!s) return defaultValue;
+    if (*s == L'\0') {
+        Wh_FreeStringSetting(s);
+        return defaultValue;
+    }
+    Wh_FreeStringSetting(s);
+    return Wh_GetIntSetting(key);
+}
+
+[[nodiscard]] inline bool ReadBoolSettingSafe(PCWSTR key, bool defaultValue = false) {
+    PCWSTR s = Wh_GetStringSetting(key);
+    if (!s) return defaultValue;
+    if (*s == L'\0') {
+        Wh_FreeStringSetting(s);
+        return defaultValue;
+    }
+    Wh_FreeStringSetting(s);
+    return Wh_GetIntSetting(key) != 0;
+}
+
+[[nodiscard]] inline std::wstring ReadStringSettingSafe(PCWSTR key, const std::wstring& defaultValue) {
+    PCWSTR s = Wh_GetStringSetting(key);
+    if (s) {
+        std::wstring res = (*s != L'\0') ? s : defaultValue;
+        Wh_FreeStringSetting(s);
+        return res;
+    }
+    return defaultValue;
+}
+
+[[nodiscard]] inline std::optional<int> ParsePositiveInt(std::wstring_view sv) noexcept {
+    if (sv.empty() || sv.length() > 6) return std::nullopt;
+    int val = 0;
+    for (wchar_t c : sv) {
+        if (c < L'0' || c > L'9') return std::nullopt;
+        val = val * 10 + (c - L'0');
+    }
+    return val;
+}
+
+[[nodiscard]] constexpr std::wstring_view Trim(std::wstring_view sv) noexcept {
+    constexpr std::wstring_view whitespace = L" \t\r\n\"'";
+    const auto start = sv.find_first_not_of(whitespace);
+    if (start == std::wstring_view::npos) return {};
+    const auto end = sv.find_last_not_of(whitespace);
+    return sv.substr(start, end - start + 1);
+}
+
+[[nodiscard]] inline bool EqualsIgnoreCase(std::wstring_view a, std::wstring_view b) noexcept {
+    if (a.size() != b.size()) return false;
+    if (a.empty()) return true;
+    return _wcsnicmp(a.data(), b.data(), a.size()) == 0;
+}
+
+[[nodiscard]] std::wstring FormatAppNameForDisplay(std::wstring_view appName) {
+    auto slash = appName.find_last_of(L"\\/");
+    if (slash != std::wstring_view::npos) {
+        appName = appName.substr(slash + 1);
+    }
+    if (appName.length() > 4 && EqualsIgnoreCase(appName.substr(appName.length() - 4), L".exe")) {
+        appName = appName.substr(0, appName.length() - 4);
+    }
+    return std::wstring(appName);
+}
+
+[[nodiscard]] std::vector<std::wstring> ParseAppList(std::wstring_view listStr) {
+    std::vector<std::wstring> result;
+    size_t start = 0;
+    while (start < listStr.length()) {
+        size_t end = listStr.find_first_of(L";,", start);
+        if (end == std::wstring_view::npos) end = listStr.length();
+        std::wstring_view token = Trim(listStr.substr(start, end - start));
+        start = end + 1;
+        if (token.empty()) continue;
+
+        auto slash = token.find_last_of(L"\\/");
+        if (slash != std::wstring_view::npos) token = token.substr(slash + 1);
+        if (token.empty()) continue;
+
+        std::wstring clean(token);
+        for (auto& c : clean) c = static_cast<wchar_t>(::towlower(c));
+        if (clean.length() < 4 || clean.compare(clean.length() - 4, 4, L".exe") != 0) {
+            clean += L".exe";
+        }
+        if (std::find(result.begin(), result.end(), clean) == result.end()) {
+            result.push_back(std::move(clean));
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] bool IsAppInList(std::wstring_view appName, const std::vector<std::wstring>& list) noexcept {
+    auto slash = appName.find_last_of(L"\\/");
+    if (slash != std::wstring_view::npos) {
+        appName = appName.substr(slash + 1);
+    }
+    if (appName.empty()) return false;
+
+    for (const auto& item : list) {
+        std::wstring_view itemV = item;
+        if (EqualsIgnoreCase(appName, itemV)) return true;
+        if (itemV.length() > 4 && EqualsIgnoreCase(itemV.substr(itemV.length() - 4), L".exe")) {
+            if (EqualsIgnoreCase(appName, itemV.substr(0, itemV.length() - 4))) return true;
+        }
+    }
+    return false;
+}
+
+struct TimeOfDay {
+    int hour = 0;
+    int minute = 0;
+};
+
+[[nodiscard]] std::optional<TimeOfDay> ParseFlexibleTime(std::wstring_view rawInput) noexcept {
+    std::wstring_view s = Trim(rawInput);
+    if (s.empty() || s.length() > 32) return std::nullopt;
+
+    bool isPM = false;
+    bool hasAmPm = false;
+
+    if (s.length() >= 2) {
+        wchar_t c1 = static_cast<wchar_t>(::towlower(s[s.length() - 2]));
+        wchar_t c2 = static_cast<wchar_t>(::towlower(s[s.length() - 1]));
+        if (c1 == L'p' && c2 == L'm') {
+            isPM = true;
+            hasAmPm = true;
+            s = Trim(s.substr(0, s.length() - 2));
+        } else if (c1 == L'a' && c2 == L'm') {
+            hasAmPm = true;
+            s = Trim(s.substr(0, s.length() - 2));
+        }
+    }
+
+    std::wstring buf(s);
+    int h = -1, m = 0;
+    int matched = swscanf_s(buf.c_str(), L"%d:%d", &h, &m);
+    if (matched < 1) {
+        return std::nullopt;
+    }
+    if (matched == 1) {
+        m = 0;
+    }
+
+    if (hasAmPm) {
+        if (h < 1 || h > 12) return std::nullopt;
+        if (isPM && h < 12) h += 12;
+        else if (!isPM && h == 12) h = 0;
+    }
+
+    if (h >= 0 && h <= 23 && m >= 0 && m <= 59) {
+        return TimeOfDay{ h, m };
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] bool IsCurrentTimeInSchedule(std::wstring_view startStr, std::wstring_view endStr) noexcept {
+    const auto startOpt = ParseFlexibleTime(startStr);
+    const auto endOpt = ParseFlexibleTime(endStr);
+    if (!startOpt || !endOpt) return false;
+
+    SYSTEMTIME st = {};
+    GetLocalTime(&st);
+    const int cur = st.wHour * 60 + st.wMinute;
+    const int start = startOpt->hour * 60 + startOpt->minute;
+    const int end = endOpt->hour * 60 + endOpt->minute;
+
+    if (start == end) return false;
+    return (start < end) ? (cur >= start && cur < end) : (cur >= start || cur < end);
+}
+
+
+// ============================================================================
+// Settings Management
+// ============================================================================
+
+void LoadSettings() {
+    // 1. Power & Battery
+    g_settings.chargeSwitchingEnabled = ReadBoolSettingSafe(L"PowerAndBattery.ChargeSwitchingEnabled", true);
+
+    std::wstring acRateStr = ReadStringSettingSafe(L"PowerAndBattery.PluggedInRate", L"max");
+    if (acRateStr == L"max" || acRateStr == L"auto") {
+        g_settings.targetAC = 0; // 0 = automatic highest supported
+    } else if (acRateStr == L"custom") {
+        int customAc = ReadIntSettingSafe(L"PowerAndBattery.CustomPluggedInRate", 144);
+        g_settings.targetAC = (customAc >= 30) ? static_cast<DWORD>(customAc) : 144;
+    } else {
+        auto r = ParsePositiveInt(acRateStr);
+        g_settings.targetAC = (r && *r >= 30) ? static_cast<DWORD>(*r) : 0;
+    }
+
+    std::wstring dcRateStr = ReadStringSettingSafe(L"PowerAndBattery.OnBatteryRate", L"60");
+    if (dcRateStr == L"min") {
+        g_settings.targetDC = 1; // 1 = lowest supported
+    } else if (dcRateStr == L"match_ac") {
+        g_settings.targetDC = 0; // 0 = match AC
+    } else if (dcRateStr == L"custom") {
+        int customDc = ReadIntSettingSafe(L"PowerAndBattery.CustomBatteryRate", 60);
+        g_settings.targetDC = (customDc >= 30) ? static_cast<DWORD>(customDc) : 60;
+    } else {
+        auto r = ParsePositiveInt(dcRateStr);
+        g_settings.targetDC = (r && *r >= 30) ? static_cast<DWORD>(*r) : 60;
+    }
+
+    g_settings.energySaverEnabled = ReadBoolSettingSafe(L"PowerAndBattery.EnergySaverEnabled", true);
+    g_settings.energySaverAction = ReadStringSettingSafe(L"PowerAndBattery.EnergySaverRate", L"60");
+    if (g_settings.energySaverAction == L"force_low" || g_settings.energySaverAction.empty()) {
+        g_settings.energySaverAction = L"60";
+    }
+    if (g_settings.energySaverAction == L"custom") {
+        int customEs = ReadIntSettingSafe(L"PowerAndBattery.CustomEnergySaverRate", 60);
+        g_settings.targetEnergySaver = (customEs >= 30) ? static_cast<DWORD>(customEs) : 60;
+    }
+
+    // 2. Gaming & Applications
+    g_settings.autoGameBoost = ReadBoolSettingSafe(L"GamingAndApps.AutoGameBoost", true);
+    g_settings.appRulesEnabled = ReadBoolSettingSafe(L"GamingAndApps.AppRulesEnabled", false);
+    g_settings.highRefreshApps = ReadStringSettingSafe(L"GamingAndApps.HighRefreshApps", L"cs2; valorant; overwatch; cyberpunk2077; blender");
+    g_settings.lowRefreshApps = ReadStringSettingSafe(L"GamingAndApps.LowRefreshApps", L"vlc; mpc-hc64; netflix; acrobat");
+    g_settings.inhibitAppsEnabled = ReadBoolSettingSafe(L"GamingAndApps.InhibitAppsEnabled", true);
+    g_settings.inhibitApps = ReadStringSettingSafe(L"GamingAndApps.InhibitApps", L"obs64; obs; streamlabs; powerpnt");
+
+    g_parsedHighRefreshApps = ParseAppList(g_settings.highRefreshApps);
+    g_parsedLowRefreshApps = ParseAppList(g_settings.lowRefreshApps);
+    g_parsedInhibitApps = ParseAppList(g_settings.inhibitApps);
+    s_lastInhibitCheckTick = 0;
+    s_cachedInhibitMatch = std::nullopt;
+
+    // 3. Night Schedule
+    g_settings.timeScheduleEnabled = ReadBoolSettingSafe(L"Schedule.TimeScheduleEnabled", false);
+    g_settings.scheduleStart = ReadStringSettingSafe(L"Schedule.ScheduleStart", L"22:00");
+    g_settings.scheduleEnd = ReadStringSettingSafe(L"Schedule.ScheduleEnd", L"07:00");
+
+    // 4. Display & Transitions
+    std::wstring targetDisp = ReadStringSettingSafe(L"DisplayAndTransitions.TargetDisplays", L"primary");
+    g_settings.targetDisplayAll = (targetDisp == L"all");
+    g_settings.smartDockingEnabled = ReadBoolSettingSafe(L"DisplayAndTransitions.SmartDockingEnabled", true);
+    g_settings.quietSwitchEnabled = ReadBoolSettingSafe(L"DisplayAndTransitions.QuietSwitchEnabled", true);
+    int coolSec = ReadIntSettingSafe(L"DisplayAndTransitions.AntiFlickerCooldown", 3);
+    if (coolSec < 0 || coolSec > 10) coolSec = 3;
+    g_settings.switchCooldownMs = static_cast<DWORD>(coolSec * 1000);
+
+    // 5. Shortcuts & Notifications
+    g_settings.osdEnabled = ReadBoolSettingSafe(L"ShortcutsAndNotifications.OsdBadgeEnabled", true);
+    g_settings.globalHotkeyEnabled = ReadBoolSettingSafe(L"ShortcutsAndNotifications.GlobalHotkeyEnabled", false);
+    g_settings.globalHotkey = ReadStringSettingSafe(L"ShortcutsAndNotifications.GlobalHotkey", L"Win+Ctrl+R");
+
+    UINT parsedMod = 0, parsedVk = 0;
+    if (ParseHotkeyString(g_settings.globalHotkey, parsedMod, parsedVk)) {
+        g_settings.hotkeyModifiers = parsedMod;
+        g_settings.hotkeyVk = parsedVk;
+    } else {
+        Wh_Log(L"Auto Refresh Rate: Invalid hotkey '%s'. Falling back to Win+Ctrl+R.", g_settings.globalHotkey.c_str());
+        g_settings.hotkeyModifiers = MOD_WIN | MOD_CONTROL;
+        g_settings.hotkeyVk = 'R';
+    }
+
+    g_settings.verboseLogging = ReadBoolSettingSafe(L"ShortcutsAndNotifications.VerboseLogging", true);
+
+    HWND hWnd = g_hWnd.load();
+    if (hWnd) {
+        if (g_settings.timeScheduleEnabled) {
+            SetTimer(hWnd, TIMER_ID_TIME_CHECK, TIME_CHECK_INTERVAL_MS, nullptr);
+        } else {
+            KillTimer(hWnd, TIMER_ID_TIME_CHECK);
+        }
+
+        UnregisterHotKey(hWnd, HOTKEY_ID_CYCLE);
+        if (g_settings.globalHotkeyEnabled) {
+            if (!RegisterHotKey(hWnd, HOTKEY_ID_CYCLE, g_settings.hotkeyModifiers | MOD_NOREPEAT, g_settings.hotkeyVk)) {
+                if (!RegisterHotKey(hWnd, HOTKEY_ID_CYCLE, g_settings.hotkeyModifiers, g_settings.hotkeyVk)) {
+                    Wh_Log(L"Auto Refresh Rate: Failed to register hotkey '%s' (mod=0x%X, vk=0x%X). Combination may be reserved.",
+                           g_settings.globalHotkey.c_str(), g_settings.hotkeyModifiers, g_settings.hotkeyVk);
+                }
+            }
+        }
+    }
+
+    Wh_Log(L"Auto Refresh Rate Settings loaded: PluggedIn=%s, Battery=%s, EnergySaver=%s, GameBoost=%s, AppRules=%s, QuietSwitch=%s, Inhibit=%s, Hotkey=%s",
+           (g_settings.targetAC == 0 ? L"Max" : std::to_wstring(g_settings.targetAC).c_str()),
+           (g_settings.targetDC == 1 ? L"Min" : (g_settings.targetDC == 0 ? L"MatchAC" : std::to_wstring(g_settings.targetDC).c_str())),
+           g_settings.energySaverAction.c_str(),
+           g_settings.autoGameBoost ? L"ON" : L"OFF",
+           g_settings.appRulesEnabled ? L"ON" : L"OFF",
+           g_settings.quietSwitchEnabled ? L"ON" : L"OFF",
+           g_settings.inhibitAppsEnabled ? L"ON" : L"OFF",
+           g_settings.globalHotkeyEnabled ? g_settings.globalHotkey.c_str() : L"Disabled");
+}
 
 
 // ============================================================================
