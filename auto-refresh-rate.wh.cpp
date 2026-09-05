@@ -2,7 +2,7 @@
 // @id              auto-refresh-rate
 // @name            Auto Refresh Rate
 // @description     Automatically switch monitor refresh rates based on AC/battery power, fullscreen games, foreground apps, and docking.
-// @version         0.8.0
+// @version         0.9.0
 // @author          roypriyanshu02
 // @github          https://github.com/roypriyanshu02
 // @homepage        https://github.com/roypriyanshu02/windhawk-auto-refresh-rate
@@ -671,6 +671,96 @@ struct TimeOfDay {
 
 
 // ============================================================================
+// Hotkey Parsing & Configuration
+// ============================================================================
+
+[[nodiscard]] bool ParseHotkeyString(std::wstring_view rawInput, UINT& outModifiers, UINT& outVk) noexcept {
+    outModifiers = 0;
+    outVk = 0;
+
+    std::wstring_view s = Trim(rawInput);
+    if (s.empty()) return false;
+
+    size_t start = 0;
+    while (start < s.length()) {
+        size_t end = s.find_first_of(L"+- \t", start);
+        if (end == std::wstring_view::npos) end = s.length();
+
+        std::wstring_view token = Trim(s.substr(start, end - start));
+        start = end + 1;
+        if (token.empty()) continue;
+
+        if (EqualsIgnoreCase(token, L"ctrl") || EqualsIgnoreCase(token, L"control")) {
+            outModifiers |= MOD_CONTROL;
+        } else if (EqualsIgnoreCase(token, L"alt")) {
+            outModifiers |= MOD_ALT;
+        } else if (EqualsIgnoreCase(token, L"shift")) {
+            outModifiers |= MOD_SHIFT;
+        } else if (EqualsIgnoreCase(token, L"win") || EqualsIgnoreCase(token, L"windows") || EqualsIgnoreCase(token, L"super")) {
+            outModifiers |= MOD_WIN;
+        } else {
+            if (token.length() == 1) {
+                wchar_t c = token[0];
+                if ((c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z')) {
+                    outVk = static_cast<UINT>(::towupper(c));
+                } else if (c >= L'0' && c <= L'9') {
+                    outVk = static_cast<UINT>(c);
+                }
+            } else if (token.length() >= 2 && (token[0] == L'f' || token[0] == L'F')) {
+                int fNum = 0;
+                bool validF = true;
+                for (size_t i = 1; i < token.length(); ++i) {
+                    if (token[i] >= L'0' && token[i] <= L'9') {
+                        fNum = fNum * 10 + (token[i] - L'0');
+                        if (fNum > 24) {
+                            validF = false;
+                            break;
+                        }
+                    } else {
+                        validF = false;
+                        break;
+                    }
+                }
+                if (validF && fNum >= 1 && fNum <= 24) {
+                    outVk = VK_F1 + static_cast<UINT>(fNum - 1);
+                }
+            } else if (EqualsIgnoreCase(token, L"space")) {
+                outVk = VK_SPACE;
+            } else if (EqualsIgnoreCase(token, L"tab")) {
+                outVk = VK_TAB;
+            } else if (EqualsIgnoreCase(token, L"enter") || EqualsIgnoreCase(token, L"return")) {
+                outVk = VK_RETURN;
+            } else if (EqualsIgnoreCase(token, L"esc") || EqualsIgnoreCase(token, L"escape")) {
+                outVk = VK_ESCAPE;
+            } else if (EqualsIgnoreCase(token, L"up")) {
+                outVk = VK_UP;
+            } else if (EqualsIgnoreCase(token, L"down")) {
+                outVk = VK_DOWN;
+            } else if (EqualsIgnoreCase(token, L"left")) {
+                outVk = VK_LEFT;
+            } else if (EqualsIgnoreCase(token, L"right")) {
+                outVk = VK_RIGHT;
+            } else if (EqualsIgnoreCase(token, L"home")) {
+                outVk = VK_HOME;
+            } else if (EqualsIgnoreCase(token, L"end")) {
+                outVk = VK_END;
+            } else if (EqualsIgnoreCase(token, L"pageup") || EqualsIgnoreCase(token, L"pgup")) {
+                outVk = VK_PRIOR;
+            } else if (EqualsIgnoreCase(token, L"pagedown") || EqualsIgnoreCase(token, L"pgdn")) {
+                outVk = VK_NEXT;
+            } else if (EqualsIgnoreCase(token, L"insert") || EqualsIgnoreCase(token, L"ins")) {
+                outVk = VK_INSERT;
+            } else if (EqualsIgnoreCase(token, L"delete") || EqualsIgnoreCase(token, L"del")) {
+                outVk = VK_DELETE;
+            }
+        }
+    }
+
+    return (outModifiers != 0 && outVk != 0);
+}
+
+
+// ============================================================================
 // Settings Management
 // ============================================================================
 
@@ -785,6 +875,267 @@ void LoadSettings() {
            g_settings.quietSwitchEnabled ? L"ON" : L"OFF",
            g_settings.inhibitAppsEnabled ? L"ON" : L"OFF",
            g_settings.globalHotkeyEnabled ? g_settings.globalHotkey.c_str() : L"Disabled");
+}
+
+
+// ============================================================================
+// Display Enumeration & Mode Switching
+// ============================================================================
+
+[[nodiscard]] std::vector<std::wstring> GetTargetDisplayDevices(bool allDisplays) {
+    std::vector<std::wstring> devices;
+    DISPLAY_DEVICEW dd = { sizeof(dd) };
+
+    for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &dd, 0); ++i) {
+        if ((dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) &&
+            !(dd.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER)) {
+            if (allDisplays || (dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE)) {
+                devices.push_back(dd.DeviceName);
+                if (!allDisplays) break;
+            }
+        }
+    }
+    if (devices.empty()) devices.push_back(L"");
+    return devices;
+}
+
+[[nodiscard]] bool SetDisplayRefreshRate(const WCHAR* pDevice, DWORD targetHz, bool noReset = false, bool* pOutChanged = nullptr) {
+    if (pOutChanged) *pOutChanged = false;
+
+    const WCHAR* pDevParam = (pDevice && *pDevice) ? pDevice : nullptr;
+    const WCHAR* pDevLog = pDevParam ? pDevParam : L"Primary";
+
+    DEVMODEW dmCurrent = {};
+    dmCurrent.dmSize = sizeof(dmCurrent);
+    if (!EnumDisplaySettingsExW(pDevParam, ENUM_CURRENT_SETTINGS, &dmCurrent, EDS_ROTATEDMODE)) {
+        Wh_Log(L"Failed to query current display settings for %s", pDevLog);
+        return false;
+    }
+
+    if (targetHz > 1 && (dmCurrent.dmDisplayFrequency == targetHz ||
+        std::abs(static_cast<int>(dmCurrent.dmDisplayFrequency) - static_cast<int>(targetHz)) <= 1)) {
+        return true;
+    }
+
+    std::vector<DWORD> supported;
+    DWORD resolved = ResolveRefreshRate(pDevParam, targetHz, dmCurrent, supported);
+    if (resolved == 0) {
+        Wh_Log(L"Target %u Hz unsupported on %s. Available: [%s]", targetHz, pDevLog, FormatRatesList(supported).c_str());
+        return false;
+    }
+
+    if (dmCurrent.dmDisplayFrequency == resolved ||
+        std::abs(static_cast<int>(dmCurrent.dmDisplayFrequency) - static_cast<int>(resolved)) <= 1) {
+        return true;
+    }
+
+    Wh_Log(L"Adjusting %s: %u Hz -> %u Hz...", pDevLog, dmCurrent.dmDisplayFrequency, resolved);
+    DEVMODEW dmTarget = dmCurrent;
+    dmTarget.dmFields |= DM_DISPLAYFREQUENCY;
+    dmTarget.dmDisplayFrequency = resolved;
+
+    if (ChangeDisplaySettingsExW(pDevParam, &dmTarget, nullptr, CDS_TEST, nullptr) != DISP_CHANGE_SUCCESSFUL) {
+        return false;
+    }
+
+    DWORD flags = CDS_UPDATEREGISTRY | (noReset ? CDS_NORESET : 0);
+    if (ChangeDisplaySettingsExW(pDevParam, &dmTarget, nullptr, flags, nullptr) == DISP_CHANGE_SUCCESSFUL) {
+        if (pOutChanged) *pOutChanged = true;
+        Wh_Log(L"Success: Display (%s) set to %u Hz.", pDevLog, resolved);
+        return true;
+    }
+    return false;
+}
+
+void ApplyRefreshRateToTargets(DWORD targetHz, const std::wstring& reasonBrief, bool forceOsd = false) {
+    auto devices = GetTargetDisplayDevices(g_settings.targetDisplayAll);
+    if (devices.empty()) return;
+
+    bool rateChanged = false;
+    bool isMulti = (g_settings.targetDisplayAll && devices.size() > 1);
+
+    for (const auto& dev : devices) {
+        const WCHAR* pDev = dev.empty() ? nullptr : dev.c_str();
+        DWORD devTargetHz = targetHz;
+        if (!g_manualOverrideActive && !g_state.isAC && g_settings.smartDockingEnabled && !IsInternalDisplayDevice(pDev)) {
+            devTargetHz = (g_settings.targetAC == 0) ? GetMaxRefreshRate(pDev) : g_settings.targetAC;
+        }
+
+        bool changed = false;
+        if (SetDisplayRefreshRate(pDev, devTargetHz, isMulti, &changed) && changed) {
+            rateChanged = true;
+        }
+    }
+
+    if (isMulti && rateChanged) {
+        if (ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr) != DISP_CHANGE_SUCCESSFUL) {
+            Wh_Log(L"Failed to apply global multi-display settings.");
+        }
+    }
+
+    if (rateChanged) {
+        g_lastSuccessfulSwitchTick = GetTickCount64();
+    }
+
+    if (rateChanged || forceOsd) {
+        DWORD osdHz = (targetHz == 0) ? GetCurrentPrimaryRefreshRate() : targetHz;
+        ShowOsdBadge(osdHz, reasonBrief);
+    }
+}
+
+void SynchronizeAndApplyPolicy(bool forceOsd, const std::wstring& forcedBrief) {
+    SYSTEM_POWER_STATUS sps = {};
+    if (GetSystemPowerStatus(&sps)) {
+        if (sps.ACLineStatus != 255) {
+            bool newAC = (sps.ACLineStatus == 1);
+            if (newAC != g_state.isAC) {
+                g_state.isAC = newAC;
+                g_manualOverrideActive = false;
+                g_manualOverrideHz = 0;
+            }
+        }
+        if (sps.BatteryLifePercent != 255) g_state.batteryPercent = sps.BatteryLifePercent;
+        g_state.isBatterySaverActive = (sps.SystemStatusFlag == 1);
+    }
+
+    g_state.powerScheme = QueryEffectivePowerPersonality(g_state.isAC);
+
+    std::wstring reason, brief;
+    DWORD targetHz = EvaluateTargetRefreshRate(g_state, reason, brief);
+    if (!forcedBrief.empty()) brief = forcedBrief;
+
+    DWORD currentHz = GetCurrentPrimaryRefreshRate();
+    bool wouldChangeRate = (targetHz != currentHz &&
+                            std::abs(static_cast<int>(targetHz) - static_cast<int>(currentHz)) > 1);
+
+    if (wouldChangeRate && !forceOsd) {
+        ULONGLONG now64 = GetTickCount64();
+
+        // Anti-flicker cooldown
+        if (g_settings.switchCooldownMs > 0 && g_lastSuccessfulSwitchTick > 0) {
+            ULONGLONG elapsed = now64 - g_lastSuccessfulSwitchTick;
+            if (elapsed < g_settings.switchCooldownMs) {
+                DWORD remaining = static_cast<DWORD>(g_settings.switchCooldownMs - elapsed);
+                if (g_hWnd) {
+                    SetTimer(g_hWnd, TIMER_ID_COOLDOWN_SWITCH, remaining + 50, nullptr);
+                }
+                Wh_Log(L"Transition cooldown active (%u ms remaining). Deferring switch to %u Hz.", remaining, targetHz);
+                return;
+            }
+        }
+
+        // Mouse drag and selection protection
+        if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) || (GetAsyncKeyState(VK_RBUTTON) & 0x8000)) {
+            if (g_hWnd) {
+                SetTimer(g_hWnd, TIMER_ID_QUIET_SWITCH, 250, nullptr);
+            }
+            Wh_Log(L"Mouse button held. Deferring switch to %u Hz until release.", targetHz);
+            return;
+        }
+
+        // Quiet switching: defer until user input is idle
+        if (g_settings.quietSwitchEnabled) {
+            bool isDrop = (targetHz < currentHz);
+            if (isDrop) {
+                LASTINPUTINFO lii = { sizeof(lii) };
+                if (GetLastInputInfo(&lii)) {
+                    DWORD now32 = static_cast<DWORD>(now64);
+                    DWORD inactiveMs = now32 - lii.dwTime;
+                    if (inactiveMs < QUIET_SWITCH_TIMEOUT_MS) {
+                        DWORD waitMs = QUIET_SWITCH_TIMEOUT_MS - inactiveMs + 100;
+                        if (waitMs < 250) waitMs = 250;
+                        if (g_hWnd) {
+                            SetTimer(g_hWnd, TIMER_ID_QUIET_SWITCH, waitMs, nullptr);
+                        }
+                        Wh_Log(L"User active (input %u ms ago, threshold %u ms). Deferring switch to %u Hz until idle.",
+                               inactiveMs, QUIET_SWITCH_TIMEOUT_MS, targetHz);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    if (g_hWnd) {
+        KillTimer(g_hWnd, TIMER_ID_QUIET_SWITCH);
+        KillTimer(g_hWnd, TIMER_ID_COOLDOWN_SWITCH);
+    }
+
+    PrintStatusDashboard(g_state, targetHz, reason);
+    ApplyRefreshRateToTargets(targetHz, brief, forceOsd);
+}
+
+void CycleRefreshRatesViaHotkey() {
+    DEVMODEW dmCurrent = {};
+    dmCurrent.dmSize = sizeof(dmCurrent);
+    if (!EnumDisplaySettingsExW(nullptr, ENUM_CURRENT_SETTINGS, &dmCurrent, EDS_ROTATEDMODE)) return;
+
+    std::vector<DWORD> rates;
+    (void)ResolveRefreshRate(nullptr, 0, dmCurrent, rates);
+    if (rates.empty()) return;
+
+    DWORD currentHz = dmCurrent.dmDisplayFrequency;
+
+    if (!g_manualOverrideActive) {
+        // Step to the next supported rate above current active frequency, or wrap to lowest
+        DWORD nextHz = rates[0];
+        for (DWORD r : rates) {
+            if (r > currentHz) {
+                nextHz = r;
+                break;
+            }
+        }
+        g_manualOverrideActive = true;
+        g_manualOverrideHz = nextHz;
+        Wh_Log(L"Hotkey %s: Locked to %u Hz (was %u Hz).", g_settings.globalHotkey.c_str(), nextHz, currentHz);
+        SynchronizeAndApplyPolicy(true, L"Manual lock");
+    } else {
+        size_t curIdx = rates.size();
+        for (size_t i = 0; i < rates.size(); ++i) {
+            if (rates[i] == g_manualOverrideHz) { curIdx = i; break; }
+        }
+        if (curIdx == rates.size()) {
+            for (size_t i = 0; i < rates.size(); ++i) {
+                if (std::abs(static_cast<int>(rates[i]) - static_cast<int>(g_manualOverrideHz)) <= 1) { curIdx = i; break; }
+            }
+        }
+
+        if (curIdx >= rates.size() - 1) {
+            g_manualOverrideActive = false;
+            g_manualOverrideHz = 0;
+            Wh_Log(L"Hotkey %s: Returned to automatic mode.", g_settings.globalHotkey.c_str());
+            SynchronizeAndApplyPolicy(true, L"Auto mode");
+        } else {
+            DWORD nextHz = rates[curIdx + 1];
+            g_manualOverrideActive = true;
+            g_manualOverrideHz = nextHz;
+            Wh_Log(L"Hotkey %s: Cycled to %u Hz.", g_settings.globalHotkey.c_str(), nextHz);
+            SynchronizeAndApplyPolicy(true, L"Manual lock");
+        }
+    }
+}
+
+VOID CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND, LONG, LONG, DWORD, DWORD) {
+    if (event == EVENT_SYSTEM_FOREGROUND && g_hWnd) {
+        if (!g_foregroundPending.exchange(true)) {
+            PostMessageW(g_hWnd, WM_APP_FOREGROUND_CHANGED, 0, 0);
+        }
+    }
+}
+
+void RegisterAllPowerNotifications(HWND hWnd) {
+    for (size_t i = 0; i < g_powerGuids.size(); ++i) {
+        g_hPowerNotify[i] = RegisterPowerSettingNotification(hWnd, g_powerGuids[i], DEVICE_NOTIFY_WINDOW_HANDLE);
+    }
+}
+
+void UnregisterAllPowerNotifications() {
+    for (auto& h : g_hPowerNotify) {
+        if (h) {
+            UnregisterPowerSettingNotification(h);
+            h = nullptr;
+        }
+    }
 }
 
 
