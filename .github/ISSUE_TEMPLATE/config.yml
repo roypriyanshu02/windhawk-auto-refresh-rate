@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Contributing & Local Mod Setup
+    url: https://github.com/roypriyanshu02/windhawk-auto-refresh-rate/blob/main/CONTRIBUTING.md
+    about: Learn how to compile locally in Windhawk, follow architectural rules, and submit a PR.
+  - name: Report a Security Vulnerability
+    url: https://github.com/roypriyanshu02/windhawk-auto-refresh-rate/security/advisories/new
+    about: Please report shell crashes or memory safety vulnerabilities privately.
