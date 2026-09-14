@@ -1,0 +1,86 @@
+name: Bug report
+description: Report a display switching failure, explorer.exe crash, or hotkey issue
+title: "[BUG] "
+labels: ["bug"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > **Tip:** Enable **Verbose Logging** in the Windhawk **Settings** tab, reproduce the issue, and copy the output from the **Log** tab before submitting.
+
+  - type: textarea
+    id: bug_description
+    attributes:
+      label: Describe the bug
+      description: A clear and concise description of what went wrong.
+      placeholder: "e.g. Display fails to drop to 60 Hz when unplugging charger, explorer.exe crashes on resume from sleep, global hotkey does not cycle"
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment Details
+      description: Provide details about the system and display hardware where the issue occurred.
+      value: |
+        - **Windows Version & Build:** (run `winver`, e.g., Windows 11 23H2 build 22631.3007)
+        - **Windhawk Version:** (e.g., v1.5.1)
+        - **Mod Version:** (e.g., v1.0.0)
+        - **Display Setup:** (e.g., Laptop internal 2560x1600 @ 165 Hz; External 1080p @ 144 Hz via Type-C DP)
+        - **GPU & Driver Version:** (e.g., NVIDIA RTX 4060 Laptop Driver 551.86 / Intel Iris Xe)
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Exact steps to reproduce the behavior.
+      value: |
+        1. Connect laptop to AC power (confirm rate is 165 Hz).
+        2. Unplug power cable.
+        3. Observe refresh rate does not transition to 60 Hz.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: A clear description of what you expected to happen instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Windhawk Mod Log Output
+      description: Paste relevant diagnostic output from Windhawk client → Mods → Auto Refresh Rate → Log.
+      render: text
+      placeholder: |
+        [Auto Refresh Rate] Adjusting \\.\DISPLAY1: 165 Hz -> 60 Hz...
+        [Auto Refresh Rate] Success: Display (\\.\DISPLAY1) set to 60 Hz.
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context
+      description: Any other relevant details (e.g., Advanced Optimus / MUX switch mode, HDR enabled, G-Sync active, dock model).
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submission Checklist
+      description: Please confirm the following before submitting.
+      options:
+        - label: I have searched existing issues to ensure this is not a duplicate.
+          required: true
+        - label: I am using the latest version of Auto Refresh Rate and Windhawk.
+          required: false
+        - label: My operating system and graphics drivers (Intel / AMD / NVIDIA) are up to date.
+          required: false
