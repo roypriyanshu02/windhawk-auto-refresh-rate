@@ -672,12 +672,18 @@ struct TimeOfDay {
         } else if (EqualsIgnoreCase(token, L"win") || EqualsIgnoreCase(token, L"windows") || EqualsIgnoreCase(token, L"super")) {
             outModifiers |= MOD_WIN;
         } else {
+            if (outVk != 0) {
+                // Reject multiple non-modifier keys (e.g. Ctrl+R+X)
+                return false;
+            }
+
+            UINT vk = 0;
             if (token.length() == 1) {
                 wchar_t c = token[0];
                 if ((c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z')) {
-                    outVk = static_cast<UINT>(::towupper(c));
+                    vk = static_cast<UINT>(::towupper(c));
                 } else if (c >= L'0' && c <= L'9') {
-                    outVk = static_cast<UINT>(c);
+                    vk = static_cast<UINT>(c);
                 }
             } else if (token.length() >= 2 && (token[0] == L'f' || token[0] == L'F')) {
                 int fNum = 0;
@@ -695,37 +701,43 @@ struct TimeOfDay {
                     }
                 }
                 if (validF && fNum >= 1 && fNum <= 24) {
-                    outVk = VK_F1 + static_cast<UINT>(fNum - 1);
+                    vk = VK_F1 + static_cast<UINT>(fNum - 1);
                 }
             } else if (EqualsIgnoreCase(token, L"space")) {
-                outVk = VK_SPACE;
+                vk = VK_SPACE;
             } else if (EqualsIgnoreCase(token, L"tab")) {
-                outVk = VK_TAB;
+                vk = VK_TAB;
             } else if (EqualsIgnoreCase(token, L"enter") || EqualsIgnoreCase(token, L"return")) {
-                outVk = VK_RETURN;
+                vk = VK_RETURN;
             } else if (EqualsIgnoreCase(token, L"esc") || EqualsIgnoreCase(token, L"escape")) {
-                outVk = VK_ESCAPE;
+                vk = VK_ESCAPE;
             } else if (EqualsIgnoreCase(token, L"up")) {
-                outVk = VK_UP;
+                vk = VK_UP;
             } else if (EqualsIgnoreCase(token, L"down")) {
-                outVk = VK_DOWN;
+                vk = VK_DOWN;
             } else if (EqualsIgnoreCase(token, L"left")) {
-                outVk = VK_LEFT;
+                vk = VK_LEFT;
             } else if (EqualsIgnoreCase(token, L"right")) {
-                outVk = VK_RIGHT;
+                vk = VK_RIGHT;
             } else if (EqualsIgnoreCase(token, L"home")) {
-                outVk = VK_HOME;
+                vk = VK_HOME;
             } else if (EqualsIgnoreCase(token, L"end")) {
-                outVk = VK_END;
+                vk = VK_END;
             } else if (EqualsIgnoreCase(token, L"pageup") || EqualsIgnoreCase(token, L"pgup")) {
-                outVk = VK_PRIOR;
+                vk = VK_PRIOR;
             } else if (EqualsIgnoreCase(token, L"pagedown") || EqualsIgnoreCase(token, L"pgdn")) {
-                outVk = VK_NEXT;
+                vk = VK_NEXT;
             } else if (EqualsIgnoreCase(token, L"insert") || EqualsIgnoreCase(token, L"ins")) {
-                outVk = VK_INSERT;
+                vk = VK_INSERT;
             } else if (EqualsIgnoreCase(token, L"delete") || EqualsIgnoreCase(token, L"del")) {
-                outVk = VK_DELETE;
+                vk = VK_DELETE;
             }
+
+            if (vk == 0) {
+                // Reject unknown/bogus key tokens (e.g. Ctrl+R+bogus)
+                return false;
+            }
+            outVk = vk;
         }
     }
 
@@ -851,7 +863,7 @@ static std::optional<std::wstring> s_cachedInhibitMatch;
     }
     outRates = std::move(dedup);
 
-    if (outRates.empty()) return (targetHz > 1 ? targetHz : 60);
+    if (outRates.empty()) return 0; // Fail closed: no supported modes enumerated
 
     // targetHz == 0: Highest supported refresh rate
     if (targetHz == 0) return outRates.back();
@@ -886,9 +898,10 @@ static std::optional<std::wstring> s_cachedInhibitMatch;
 [[nodiscard]] DWORD GetMaxRefreshRate(const WCHAR* pDevice = nullptr) {
     DEVMODEW dm = {};
     dm.dmSize = sizeof(dm);
-    if (!EnumDisplaySettingsExW(pDevice, ENUM_CURRENT_SETTINGS, &dm, EDS_ROTATEDMODE)) return 144;
+    if (!EnumDisplaySettingsExW(pDevice, ENUM_CURRENT_SETTINGS, &dm, EDS_ROTATEDMODE)) return 60;
     std::vector<DWORD> rates;
-    return ResolveRefreshRate(pDevice, 0, dm, rates);
+    DWORD res = ResolveRefreshRate(pDevice, 0, dm, rates);
+    return (res > 0) ? res : (dm.dmDisplayFrequency > 0 ? dm.dmDisplayFrequency : 60);
 }
 
 [[nodiscard]] DWORD GetMinRefreshRate(const WCHAR* pDevice = nullptr) {
@@ -896,7 +909,8 @@ static std::optional<std::wstring> s_cachedInhibitMatch;
     dm.dmSize = sizeof(dm);
     if (!EnumDisplaySettingsExW(pDevice, ENUM_CURRENT_SETTINGS, &dm, EDS_ROTATEDMODE)) return 60;
     std::vector<DWORD> rates;
-    return ResolveRefreshRate(pDevice, 1, dm, rates);
+    DWORD res = ResolveRefreshRate(pDevice, 1, dm, rates);
+    return (res > 0) ? res : (dm.dmDisplayFrequency > 0 ? dm.dmDisplayFrequency : 60);
 }
 
 [[nodiscard]] std::optional<std::wstring> IsForegroundWindowFullscreen(const std::wstring& knownProc = L"") {
@@ -1461,7 +1475,7 @@ void ShowNativeNotification(DWORD hz, const std::wstring& reasonBrief) {
         return false;
     }
 
-    DWORD flags = CDS_UPDATEREGISTRY | (noReset ? CDS_NORESET : 0);
+    DWORD flags = (noReset ? CDS_NORESET : 0);
     if (ChangeDisplaySettingsExW(pDevParam, &dmTarget, nullptr, flags, nullptr) == DISP_CHANGE_SUCCESSFUL) {
         if (pOutChanged) *pOutChanged = true;
         Wh_Log(L"Success: Display (%s) set to %u Hz.", pDevLog, resolved);
@@ -1474,8 +1488,9 @@ void ApplyRefreshRateToTargets(DWORD targetHz, const std::wstring& reasonBrief, 
     auto devices = GetTargetDisplayDevices(g_settings.targetDisplayAll);
     if (devices.empty()) return;
 
-    bool rateChanged = false;
     bool isMulti = (g_settings.targetDisplayAll && devices.size() > 1);
+    bool anyStaged = false;
+    bool allStagesSucceeded = true;
 
     for (const auto& dev : devices) {
         const WCHAR* pDev = dev.empty() ? nullptr : dev.c_str();
@@ -1485,22 +1500,32 @@ void ApplyRefreshRateToTargets(DWORD targetHz, const std::wstring& reasonBrief, 
         }
 
         bool changed = false;
-        if (SetDisplayRefreshRate(pDev, devTargetHz, isMulti, &changed) && changed) {
-            rateChanged = true;
+        if (!SetDisplayRefreshRate(pDev, devTargetHz, isMulti, &changed)) {
+            allStagesSucceeded = false;
+        } else if (changed) {
+            anyStaged = true;
         }
     }
 
-    if (isMulti && rateChanged) {
-        if (ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr) != DISP_CHANGE_SUCCESSFUL) {
-            Wh_Log(L"Failed to apply global multi-display settings.");
+    bool commitSuccessful = false;
+    if (isMulti) {
+        if (anyStaged) {
+            if (allStagesSucceeded && ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr) == DISP_CHANGE_SUCCESSFUL) {
+                commitSuccessful = true;
+            } else {
+                Wh_Log(L"Multi-display refresh rate commit failed or partial stage failure. Reverting staged changes...");
+                ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
+            }
         }
+    } else {
+        commitSuccessful = anyStaged;
     }
 
-    if (rateChanged) {
+    if (commitSuccessful) {
         g_lastSuccessfulSwitchTick = GetTickCount64();
     }
 
-    if (rateChanged || forceNotification) {
+    if (commitSuccessful || forceNotification) {
         DWORD notifHz = (targetHz == 0) ? GetCurrentPrimaryRefreshRate() : targetHz;
         ShowNativeNotification(notifHz, reasonBrief);
     }
@@ -1951,5 +1976,9 @@ void Wh_ModUninit() {
         CloseHandle(g_hMutex);
         g_hMutex = nullptr;
     }
+
+    // Restore displays to default settings recorded in registry upon mod unload
+    ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
+
     Wh_Log(L"Auto Refresh Rate mod uninitialized.");
 }
