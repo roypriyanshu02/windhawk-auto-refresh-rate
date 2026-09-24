@@ -382,7 +382,7 @@ constexpr DWORD INHIBIT_CACHE_TTL_MS            = 4000;
 constexpr DWORD HOTKEY_CYCLE_COOLDOWN_MS        = 500;
 constexpr DWORD MOUSE_DRAG_RETRY_MS             = 250;
 constexpr DWORD TIME_CHECK_INTERVAL_MS          = 30000;
-constexpr DWORD INHIBIT_RECHECK_INTERVAL_MS     = 2500;
+constexpr DWORD INHIBIT_RECHECK_INTERVAL_MS     = 5000;
 constexpr DWORD TRAY_ICON_LIFETIME_MS           = 5000;
 
 // ============================================================================
@@ -458,7 +458,6 @@ static DWORD g_manualOverrideHz = 0;
 static std::atomic<bool> s_trayIconActive{false};
 
 
-static std::atomic<bool> g_foregroundPending{false};
 
 void SynchronizeAndApplyPolicy(bool forceNotification = false, const std::wstring& forcedBrief = L"");
 void ShowNativeNotification(DWORD hz, const std::wstring& reasonBrief);
@@ -470,33 +469,24 @@ void LoadSettings();
 // ============================================================================
 
 [[nodiscard]] inline int ReadIntSettingSafe(PCWSTR key, int defaultValue = 0) {
-    PCWSTR s = Wh_GetStringSetting(key);
-    if (!s) return defaultValue;
-    if (*s == L'\0') {
-        Wh_FreeStringSetting(s);
-        return defaultValue;
-    }
-    Wh_FreeStringSetting(s);
     return Wh_GetIntSetting(key);
 }
 
 [[nodiscard]] inline bool ReadBoolSettingSafe(PCWSTR key, bool defaultValue = false) {
-    PCWSTR s = Wh_GetStringSetting(key);
-    if (!s) return defaultValue;
-    if (*s == L'\0') {
-        Wh_FreeStringSetting(s);
-        return defaultValue;
-    }
-    Wh_FreeStringSetting(s);
     return Wh_GetIntSetting(key) != 0;
 }
 
 [[nodiscard]] inline std::wstring ReadStringSettingSafe(PCWSTR key, const std::wstring& defaultValue) {
     PCWSTR s = Wh_GetStringSetting(key);
     if (s) {
-        std::wstring res = (*s != L'\0') ? s : defaultValue;
+        std::wstring res;
+        if (*s) {
+            res = s;
+        }
         Wh_FreeStringSetting(s);
-        return res;
+        if (!res.empty()) {
+            return res;
+        }
     }
     return defaultValue;
 }
@@ -830,6 +820,7 @@ void InvalidateInhibitAppCache() noexcept {
     int minDiff = 999999;
 
     for (DWORD i = 0; EnumDisplaySettingsExW(pDevice, i, &dmEnum, EDS_ROTATEDMODE); ++i) {
+        dmEnum.dmSize = sizeof(dmEnum);
         if (dmEnum.dmPelsWidth == dmCurrent.dmPelsWidth &&
             dmEnum.dmPelsHeight == dmCurrent.dmPelsHeight &&
             dmEnum.dmBitsPerPel == dmCurrent.dmBitsPerPel) {
@@ -923,6 +914,9 @@ void InvalidateInhibitAppCache() noexcept {
     HWND hFore = GetForegroundWindow();
     if (!hFore || !IsWindowVisible(hFore) || IsIconic(hFore)) return std::nullopt;
 
+    // Maximized standard windows with autohidden taskbars cover the monitor but are NOT fullscreen games
+    if (IsZoomed(hFore)) return std::nullopt;
+
     WCHAR szClass[128] = {};
     GetClassNameW(hFore, szClass, 127);
     if (_wcsicmp(szClass, L"Progman") == 0 ||
@@ -930,8 +924,7 @@ void InvalidateInhibitAppCache() noexcept {
         _wcsicmp(szClass, L"Shell_TrayWnd") == 0 ||
         _wcsicmp(szClass, L"Shell_SecondaryTrayWnd") == 0 ||
         _wcsicmp(szClass, L"CabinetWClass") == 0 ||
-        _wcsicmp(szClass, L"TaskManagerWindow") == 0 ||
-        _wcsicmp(szClass, L"Windows.UI.Core.CoreWindow") == 0) {
+        _wcsicmp(szClass, L"TaskManagerWindow") == 0) {
         return std::nullopt;
     }
 
@@ -940,7 +933,13 @@ void InvalidateInhibitAppCache() noexcept {
         _wcsicmp(proc.c_str(), L"LogonUI.exe") == 0 ||
         _wcsicmp(proc.c_str(), L"SearchHost.exe") == 0 ||
         _wcsicmp(proc.c_str(), L"explorer.exe") == 0 ||
-        _wcsicmp(proc.c_str(), L"StartMenuExperienceHost.exe") == 0) {
+        _wcsicmp(proc.c_str(), L"StartMenuExperienceHost.exe") == 0 ||
+        _wcsicmp(proc.c_str(), L"ShellExperienceHost.exe") == 0) {
+        return std::nullopt;
+    }
+
+    // Windows.UI.Core.CoreWindow: reject only desktop shell, allow native UWP games (e.g. Minecraft, Forza)
+    if (_wcsicmp(szClass, L"Windows.UI.Core.CoreWindow") == 0 && proc.empty()) {
         return std::nullopt;
     }
 
@@ -1027,6 +1026,7 @@ void InvalidateDisplayDeviceCache() noexcept {
     if (!pDeviceName || !*pDeviceName) {
         DISPLAY_DEVICEW dd = { sizeof(dd) };
         for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &dd, 0); ++i) {
+            dd.cb = sizeof(dd);
             if ((dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) &&
                 (dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE)) {
                 resolvedName = dd.DeviceName;
@@ -1212,8 +1212,8 @@ void LoadSettings() {
 // Target refresh rate evaluation policy
 // ============================================================================
 
-[[nodiscard]] DWORD EvaluateTargetRefreshRate(const PowerStateSnapshot& state, std::wstring& outReason, std::wstring& outBrief, bool& outIsInhibited) {
-    outIsInhibited = false;
+[[nodiscard]] DWORD EvaluateTargetRefreshRate(const PowerStateSnapshot& state, std::wstring& outReason, std::wstring& outBrief, bool& outIsPowerBaseline) {
+    outIsPowerBaseline = false;
 
     // 1. Manual hotkey lock
     if (g_manualOverrideActive && g_manualOverrideHz > 0) {
@@ -1223,61 +1223,44 @@ void LoadSettings() {
     }
 
     std::wstring foreProc;
-    if (g_settings.inhibitAppsEnabled || g_settings.appRulesEnabled || g_settings.autoGameBoost) {
+    if (g_settings.appRulesEnabled || g_settings.autoGameBoost) {
         foreProc = GetForegroundProcessName();
     }
 
-    // 2. Protected applications
-    if (g_settings.inhibitAppsEnabled) {
-        if (!foreProc.empty() && IsAppInList(foreProc, g_parsedInhibitApps)) {
-            outBrief = L"Protected: " + FormatAppNameForDisplay(foreProc);
-            outReason = L"Protected app in focus ('" + foreProc + L"'), display switching inhibited";
-            outIsInhibited = true;
-            return GetCurrentPrimaryRefreshRate();
-        }
-
-        auto matchedInhibit = CheckAppInRunningList(g_parsedInhibitApps);
-        if (matchedInhibit) {
-            outBrief = L"Protected: " + FormatAppNameForDisplay(*matchedInhibit);
-            outReason = L"Protected app running ('" + *matchedInhibit + L"'), display switching inhibited";
-            outIsInhibited = true;
-            return GetCurrentPrimaryRefreshRate();
-        }
-    }
-
-    DWORD resolvedAC = (g_settings.targetAC == 0) ? GetMaxRefreshRate() : g_settings.targetAC;
-    DWORD resolvedDC = (g_settings.targetDC == 1) ? GetMinRefreshRate() : ((g_settings.targetDC == 0) ? resolvedAC : g_settings.targetDC);
+    DWORD displayAC = (g_settings.targetAC == 0) ? GetMaxRefreshRate() : g_settings.targetAC;
+    DWORD displayDC = (g_settings.targetDC == 1) ? GetMinRefreshRate() : ((g_settings.targetDC == 0) ? displayAC : g_settings.targetDC);
 
     // 3. Windows Energy Saver
     if (g_settings.energySaverEnabled && state.isBatterySaverActive && g_settings.energySaverAction != L"ignore") {
         DWORD resolvedSaver = 60;
         if (g_settings.energySaverAction == L"min") {
-            resolvedSaver = GetMinRefreshRate();
+            resolvedSaver = 1; // 1 = lowest supported sentinel
         } else if (g_settings.energySaverAction == L"custom") {
             resolvedSaver = (g_settings.targetEnergySaver >= 30) ? g_settings.targetEnergySaver : 60;
         }
+        DWORD dispSaver = (resolvedSaver == 1) ? GetMinRefreshRate() : resolvedSaver;
         outBrief = L"Energy saver";
-        outReason = L"Windows Energy Saver active (" + std::to_wstring(resolvedSaver) + L" Hz)";
+        outReason = L"Windows Energy Saver active (" + std::to_wstring(dispSaver) + L" Hz)";
         return resolvedSaver;
     }
 
     // Windows 11 Power Mode slider (Best Performance boost)
     if (g_settings.chargeSwitchingEnabled && !state.isAC && IsEqualGUID(state.powerScheme, GUID_MIN_POWER_SAVINGS_LOCAL)) {
         outBrief = L"Best performance";
-        outReason = L"Windows Power Mode: Best Performance (" + std::to_wstring(resolvedAC) + L" Hz)";
-        return resolvedAC;
+        outReason = L"Windows Power Mode: Best Performance (" + std::to_wstring(displayAC) + L" Hz)";
+        return g_settings.targetAC;
     }
 
     // 4. Foreground application rules
     if (g_settings.appRulesEnabled && !foreProc.empty()) {
         if (IsAppInList(foreProc, g_parsedLowRefreshApps)) {
             outBrief = L"App saver: " + FormatAppNameForDisplay(foreProc);
-            outReason = L"Low-refresh app in focus ('" + foreProc + L"' -> " + std::to_wstring(resolvedDC) + L" Hz)";
-            return resolvedDC;
+            outReason = L"Low-refresh app in focus ('" + foreProc + L"' -> " + std::to_wstring(displayDC) + L" Hz)";
+            return g_settings.targetDC;
         } else if (IsAppInList(foreProc, g_parsedHighRefreshApps)) {
             outBrief = L"App boost: " + FormatAppNameForDisplay(foreProc);
-            outReason = L"High-refresh app in focus ('" + foreProc + L"' -> " + std::to_wstring(resolvedAC) + L" Hz)";
-            return resolvedAC;
+            outReason = L"High-refresh app in focus ('" + foreProc + L"' -> " + std::to_wstring(displayAC) + L" Hz)";
+            return g_settings.targetAC;
         }
     }
 
@@ -1287,8 +1270,8 @@ void LoadSettings() {
         if (fsProc) {
             std::wstring gameName = fsProc->empty() ? L"Fullscreen" : *fsProc;
             outBrief = L"Game: " + FormatAppNameForDisplay(gameName);
-            outReason = L"Fullscreen game detected ('" + gameName + L"' -> " + std::to_wstring(resolvedAC) + L" Hz)";
-            return resolvedAC;
+            outReason = L"Fullscreen game detected ('" + gameName + L"' -> " + std::to_wstring(displayAC) + L" Hz)";
+            return g_settings.targetAC;
         }
     }
 
@@ -1296,21 +1279,22 @@ void LoadSettings() {
     if (g_settings.timeScheduleEnabled) {
         if (IsCurrentTimeInSchedule(g_settings.scheduleStart, g_settings.scheduleEnd)) {
             outBrief = L"Night schedule";
-            outReason = L"Night schedule active (" + std::to_wstring(resolvedDC) + L" Hz)";
-            return resolvedDC;
+            outReason = L"Night schedule active (" + std::to_wstring(displayDC) + L" Hz)";
+            return g_settings.targetDC;
         }
     }
 
     // 6. Power source baseline (AC vs battery)
     if (g_settings.chargeSwitchingEnabled) {
+        outIsPowerBaseline = true;
         if (state.isAC) {
             outBrief = L"Plugged in";
-            outReason = L"AC power connected (" + std::to_wstring(resolvedAC) + L" Hz)";
-            return resolvedAC;
+            outReason = L"AC power connected (" + std::to_wstring(displayAC) + L" Hz)";
+            return g_settings.targetAC;
         } else {
             outBrief = L"Battery (" + std::to_wstring(state.batteryPercent) + L"%)";
-            outReason = L"Battery power (" + std::to_wstring(resolvedDC) + L" Hz, " + std::to_wstring(state.batteryPercent) + L"% remaining)";
-            return resolvedDC;
+            outReason = L"Battery power (" + std::to_wstring(displayDC) + L" Hz, " + std::to_wstring(state.batteryPercent) + L"% remaining)";
+            return g_settings.targetDC;
         }
     }
 
@@ -1347,6 +1331,7 @@ void PrintStatusDashboard(const PowerStateSnapshot& state, DWORD targetHz, const
     WCHAR primary[32] = {};
     DISPLAY_DEVICEW dd = { sizeof(dd) };
     for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &dd, 0); ++i) {
+        dd.cb = sizeof(dd);
         if ((dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) && (dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE)) {
             wcsncpy_s(primary, dd.DeviceName, _TRUNCATE);
             break;
@@ -1429,103 +1414,154 @@ void ShowNativeNotification(DWORD hz, const std::wstring& reasonBrief) {
 [[nodiscard]] std::vector<std::wstring> GetTargetDisplayDevices(bool allDisplays) {
     std::vector<std::wstring> devices;
     DISPLAY_DEVICEW dd = { sizeof(dd) };
+    std::wstring internalDevice;
 
     for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &dd, 0); ++i) {
+        dd.cb = sizeof(dd);
         if ((dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) &&
             !(dd.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER)) {
-            if (allDisplays || (dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE)) {
+            if (allDisplays) {
                 devices.push_back(dd.DeviceName);
-                if (!allDisplays) break;
+            } else if (dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) {
+                devices.push_back(dd.DeviceName);
+            }
+            if (!allDisplays && internalDevice.empty() && IsInternalDisplayDevice(dd.DeviceName)) {
+                internalDevice = dd.DeviceName;
             }
         }
     }
+
+    // Smart docking: on battery, include the internal laptop panel so it can lower rate even if external monitor is primary
+    if (!allDisplays && g_settings.smartDockingEnabled && !g_state.isAC && !internalDevice.empty()) {
+        if (std::find(devices.begin(), devices.end(), internalDevice) == devices.end()) {
+            devices.push_back(std::move(internalDevice));
+        }
+    }
+
     if (devices.empty()) devices.push_back(L"");
     return devices;
 }
 
-[[nodiscard]] bool SetDisplayRefreshRate(const WCHAR* pDevice, DWORD targetHz, bool* pOutChanged = nullptr) {
-    if (pOutChanged) *pOutChanged = false;
+[[nodiscard]] constexpr const WCHAR* DisplayDeviceLogName(const WCHAR* pDev) noexcept {
+    return (pDev && *pDev) ? pDev : L"Primary";
+}
 
+struct TargetDisplayPlan {
+    DEVMODEW targetMode = {};
+    bool needsChange = false;
+};
+
+[[nodiscard]] std::optional<TargetDisplayPlan> PrepareDisplayTargetMode(const WCHAR* pDevice, DWORD targetHz) {
     const WCHAR* pDevParam = (pDevice && *pDevice) ? pDevice : nullptr;
-    const WCHAR* pDevLog = pDevParam ? pDevParam : L"Primary";
+    const WCHAR* pDevLog = DisplayDeviceLogName(pDevParam);
 
     DEVMODEW dmCurrent = {};
     dmCurrent.dmSize = sizeof(dmCurrent);
     if (!EnumDisplaySettingsExW(pDevParam, ENUM_CURRENT_SETTINGS, &dmCurrent, EDS_ROTATEDMODE)) {
         Wh_Log(L"Failed to query current display settings for %s", pDevLog);
-        return false;
+        return std::nullopt;
     }
 
     if (targetHz > 1 && (dmCurrent.dmDisplayFrequency == targetHz ||
         std::abs(static_cast<int>(dmCurrent.dmDisplayFrequency) - static_cast<int>(targetHz)) <= 1)) {
-        return true;
+        return TargetDisplayPlan{ dmCurrent, false };
     }
 
     std::vector<DWORD> supported;
     DWORD resolved = ResolveRefreshRate(pDevParam, targetHz, dmCurrent, supported);
     if (resolved == 0) {
         Wh_Log(L"Target %u Hz unsupported on %s. Available: [%s]", targetHz, pDevLog, FormatRatesList(supported).c_str());
-        return false;
+        return std::nullopt;
     }
 
     if (dmCurrent.dmDisplayFrequency == resolved ||
         std::abs(static_cast<int>(dmCurrent.dmDisplayFrequency) - static_cast<int>(resolved)) <= 1) {
-        return true;
+        return TargetDisplayPlan{ dmCurrent, false };
     }
 
-    Wh_Log(L"Adjusting %s: %u Hz -> %u Hz...", pDevLog, dmCurrent.dmDisplayFrequency, resolved);
-    DEVMODEW dmTarget = dmCurrent;
-    dmTarget.dmFields |= DM_DISPLAYFREQUENCY;
-    dmTarget.dmDisplayFrequency = resolved;
+    DEVMODEW targetMode = dmCurrent;
+    targetMode.dmFields |= DM_DISPLAYFREQUENCY;
+    targetMode.dmDisplayFrequency = resolved;
 
-    if (ChangeDisplaySettingsExW(pDevParam, &dmTarget, nullptr, CDS_TEST, nullptr) != DISP_CHANGE_SUCCESSFUL) {
-        return false;
+    if (ChangeDisplaySettingsExW(pDevParam, &targetMode, nullptr, CDS_TEST, nullptr) != DISP_CHANGE_SUCCESSFUL) {
+        Wh_Log(L"Preflight CDS_TEST failed for %s at %u Hz.", pDevLog, resolved);
+        return std::nullopt;
     }
 
-    if (ChangeDisplaySettingsExW(pDevParam, &dmTarget, nullptr, 0, nullptr) == DISP_CHANGE_SUCCESSFUL) {
-        if (pOutChanged) *pOutChanged = true;
-        Wh_Log(L"Success: Display (%s) set to %u Hz.", pDevLog, resolved);
-        return true;
-    }
-    return false;
+    return TargetDisplayPlan{ targetMode, true };
 }
 
-void ApplyRefreshRateToTargets(DWORD targetHz, const std::wstring& reasonBrief, bool forceNotification = false) {
+void ApplyRefreshRateToTargets(DWORD targetHz, const std::wstring& reasonBrief, bool isPowerBaseline, bool forceNotification = false) {
     auto devices = GetTargetDisplayDevices(g_settings.targetDisplayAll);
     if (devices.empty()) return;
 
-    bool anyChanged = false;
+    struct PlannedTarget {
+        std::wstring deviceName;
+        DEVMODEW targetMode = {};
+        bool needsChange = false;
+    };
+    std::vector<PlannedTarget> planned;
+    planned.reserve(devices.size());
 
+    // Phase 1: Preflight test all target displays before applying any mode change
     for (const auto& dev : devices) {
         const WCHAR* pDev = dev.empty() ? nullptr : dev.c_str();
         DWORD devTargetHz = targetHz;
-        if (!g_manualOverrideActive && !g_state.isAC && g_settings.smartDockingEnabled && !IsInternalDisplayDevice(pDev)) {
+        if (!g_manualOverrideActive && isPowerBaseline && !g_state.isAC && g_settings.smartDockingEnabled && !IsInternalDisplayDevice(pDev)) {
             devTargetHz = (g_settings.targetAC == 0) ? GetMaxRefreshRate(pDev) : g_settings.targetAC;
         }
 
-        bool changed = false;
-        if (SetDisplayRefreshRate(pDev, devTargetHz, &changed) && changed) {
+        auto planOpt = PrepareDisplayTargetMode(pDev, devTargetHz);
+        if (!planOpt) {
+            Wh_Log(L"Preflight mode check failed on %s. Aborting multi-display switch to prevent partial update.",
+                   DisplayDeviceLogName(pDev));
+            return;
+        }
+        planned.push_back(PlannedTarget{ dev, planOpt->targetMode, planOpt->needsChange });
+    }
+
+    // Phase 2: Apply dynamic mode switch to all prepared targets atomically
+    bool anyChanged = false;
+    bool allSucceeded = true;
+
+    for (const auto& pt : planned) {
+        if (!pt.needsChange) continue;
+        const WCHAR* pDev = pt.deviceName.empty() ? nullptr : pt.deviceName.c_str();
+        const WCHAR* pDevLog = DisplayDeviceLogName(pDev);
+
+        DEVMODEW dmTarget = pt.targetMode;
+        Wh_Log(L"Adjusting %s: -> %u Hz...", pDevLog, dmTarget.dmDisplayFrequency);
+        if (ChangeDisplaySettingsExW(pDev, &dmTarget, nullptr, CDS_UPDATEREGISTRY | CDS_NORESET, nullptr) == DISP_CHANGE_SUCCESSFUL) {
             anyChanged = true;
+            Wh_Log(L"Success: Display (%s) staged to %u Hz.", pDevLog, dmTarget.dmDisplayFrequency);
+        } else {
+            allSucceeded = false;
+            Wh_Log(L"Failed to stage tested display settings on %s.", pDevLog);
         }
     }
 
-    if (anyChanged) {
-        g_lastSuccessfulSwitchTick = GetTickCount64();
+    if (anyChanged && allSucceeded) {
+        if (ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr) == DISP_CHANGE_SUCCESSFUL) {
+            g_lastSuccessfulSwitchTick = GetTickCount64();
+        } else {
+            allSucceeded = false;
+            Wh_Log(L"Failed atomic commit of display settings.");
+        }
     }
 
-    if (anyChanged || forceNotification) {
-        DWORD notifHz = (targetHz == 0) ? GetCurrentPrimaryRefreshRate() : targetHz;
+    if ((anyChanged && allSucceeded) || forceNotification) {
+        DWORD notifHz = (targetHz <= 1) ? GetCurrentPrimaryRefreshRate() : targetHz;
         ShowNativeNotification(notifHz, reasonBrief);
     }
 }
 
-[[nodiscard]] bool AnyDisplayNeedsChange(DWORD targetHz, bool* pOutIsDrop = nullptr) {
+[[nodiscard]] bool AnyDisplayNeedsChange(DWORD targetHz, bool isPowerBaseline, bool* pOutIsDrop = nullptr) {
     if (pOutIsDrop) *pOutIsDrop = false;
     auto devices = GetTargetDisplayDevices(g_settings.targetDisplayAll);
     for (const auto& dev : devices) {
         const WCHAR* pDev = dev.empty() ? nullptr : dev.c_str();
         DWORD devTargetHz = targetHz;
-        if (!g_manualOverrideActive && !g_state.isAC && g_settings.smartDockingEnabled && !IsInternalDisplayDevice(pDev)) {
+        if (!g_manualOverrideActive && isPowerBaseline && !g_state.isAC && g_settings.smartDockingEnabled && !IsInternalDisplayDevice(pDev)) {
             devTargetHz = (g_settings.targetAC == 0) ? GetMaxRefreshRate(pDev) : g_settings.targetAC;
         }
 
@@ -1573,9 +1609,30 @@ void SynchronizeAndApplyPolicy(bool forceNotification, const std::wstring& force
     g_state.powerScheme = QueryEffectivePowerPersonality(g_state.isAC);
 
     std::wstring reason, brief;
-    bool isInhibited = false;
-    DWORD targetHz = EvaluateTargetRefreshRate(g_state, reason, brief, isInhibited);
+    bool isPowerBaseline = false;
+    DWORD targetHz = EvaluateTargetRefreshRate(g_state, reason, brief, isPowerBaseline);
     if (!forcedBrief.empty()) brief = forcedBrief;
+
+    bool isDrop = false;
+    bool wouldChangeRate = AnyDisplayNeedsChange(targetHz, isPowerBaseline, &isDrop);
+
+    // If a rate change would occur, check if switching is inhibited by a protected application
+    bool isInhibited = false;
+    if (wouldChangeRate && g_settings.inhibitAppsEnabled && !g_manualOverrideActive) {
+        std::wstring foreProc = GetForegroundProcessName();
+        if (!foreProc.empty() && IsAppInList(foreProc, g_parsedInhibitApps)) {
+            isInhibited = true;
+            brief = L"Protected: " + FormatAppNameForDisplay(foreProc);
+            reason = L"Protected app in focus ('" + foreProc + L"'), display switching inhibited";
+        } else {
+            auto matchedInhibit = CheckAppInRunningList(g_parsedInhibitApps);
+            if (matchedInhibit) {
+                isInhibited = true;
+                brief = L"Protected: " + FormatAppNameForDisplay(*matchedInhibit);
+                reason = L"Protected app running ('" + *matchedInhibit + L"'), display switching inhibited";
+            }
+        }
+    }
 
     static bool s_lastInhibited = false;
     if (isInhibited) {
@@ -1586,7 +1643,7 @@ void SynchronizeAndApplyPolicy(bool forceNotification, const std::wstring& force
         }
         PrintStatusDashboard(g_state, targetHz, reason);
         if (!s_lastInhibited) {
-            Wh_Log(L"Auto Refresh Rate: Switching inhibited by protected application. Periodic re-checks scheduled.");
+            Wh_Log(L"Auto Refresh Rate: Switching inhibited by protected application. Re-checking when application closes.");
             s_lastInhibited = true;
         }
         return;
@@ -1596,9 +1653,6 @@ void SynchronizeAndApplyPolicy(bool forceNotification, const std::wstring& force
     if (g_hWnd) {
         KillTimer(g_hWnd, TIMER_ID_INHIBIT_RECHECK);
     }
-
-    bool isDrop = false;
-    bool wouldChangeRate = AnyDisplayNeedsChange(targetHz, &isDrop);
 
     if (wouldChangeRate && !forceNotification) {
         ULONGLONG now64 = GetTickCount64();
@@ -1616,12 +1670,11 @@ void SynchronizeAndApplyPolicy(bool forceNotification, const std::wstring& force
             }
         }
 
-        // Mouse drag and selection protection
-        if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) || (GetAsyncKeyState(VK_RBUTTON) & 0x8000)) {
+        // Mouse drag and selection protection: only defer frequency drops (never game boosts)
+        if (isDrop && ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) || (GetAsyncKeyState(VK_RBUTTON) & 0x8000))) {
             if (g_hWnd) {
                 SetTimer(g_hWnd, TIMER_ID_QUIET_SWITCH, MOUSE_DRAG_RETRY_MS, nullptr);
             }
-            Wh_Log(L"Mouse button held. Deferring switch to %u Hz until release.", targetHz);
             return;
         }
 
@@ -1654,10 +1707,15 @@ void SynchronizeAndApplyPolicy(bool forceNotification, const std::wstring& force
     if (!wouldChangeRate && !forceNotification) {
         return;
     }
-    ApplyRefreshRateToTargets(targetHz, brief, forceNotification);
+    ApplyRefreshRateToTargets(targetHz, brief, isPowerBaseline, forceNotification);
 }
 
 void CycleRefreshRatesViaHotkey() {
+    ULONGLONG now = GetTickCount64();
+    if (g_lastSuccessfulSwitchTick > 0 && (now - g_lastSuccessfulSwitchTick < HOTKEY_CYCLE_COOLDOWN_MS)) {
+        return; // Prevent GPU driver TDR from rapid hotkey spam
+    }
+
     DEVMODEW dmCurrent = {};
     dmCurrent.dmSize = sizeof(dmCurrent);
     if (!EnumDisplaySettingsExW(nullptr, ENUM_CURRENT_SETTINGS, &dmCurrent, EDS_ROTATEDMODE)) return;
@@ -1709,11 +1767,7 @@ void CycleRefreshRatesViaHotkey() {
 
 VOID CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND, LONG, LONG, DWORD, DWORD) {
     if (event == EVENT_SYSTEM_FOREGROUND && g_hWnd) {
-        if (!g_foregroundPending.exchange(true)) {
-            if (!PostMessageW(g_hWnd, WM_APP_FOREGROUND_CHANGED, 0, 0)) {
-                g_foregroundPending.store(false);
-            }
-        }
+        PostMessageW(g_hWnd, WM_APP_FOREGROUND_CHANGED, 0, 0);
     }
 }
 
@@ -1811,7 +1865,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
             return 0;
         } else if (wParam == TIMER_ID_FOREGROUND_DEBOUNCE) {
             KillTimer(hWnd, TIMER_ID_FOREGROUND_DEBOUNCE);
-            g_foregroundPending.store(false);
+            InvalidateInhibitAppCache();
             SynchronizeAndApplyPolicy();
             return 0;
         } else if (wParam == TIMER_ID_RESUME_SYNC) {
@@ -1868,7 +1922,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
         return 0;
 
     case WM_DESTROY:
-        g_foregroundPending.store(false);
         g_hWnd.store(nullptr);
         PostQuitMessage(0);
         return 0;
@@ -1910,8 +1963,6 @@ DWORD WINAPI PowerMonitorThreadProc(LPVOID lpParam) {
         }
     }
 
-    g_foregroundPending.store(false);
-
     // Omit WINEVENT_SKIPOWNPROCESS: the mod runs inside explorer.exe, so skipping the host
     // process would prevent detecting focus switches to the Desktop, Taskbar, and Start Menu.
     g_hWinEventHook = SetWinEventHook(
@@ -1948,12 +1999,28 @@ DWORD WINAPI PowerMonitorThreadProc(LPVOID lpParam) {
     return 0;
 }
 
+void ResetModState() noexcept {
+    g_manualOverrideActive = false;
+    g_manualOverrideHz = 0;
+    g_lastSuccessfulSwitchTick = 0;
+    s_lastInhibitCheckTick = 0;
+    s_cachedInhibitMatch = std::nullopt;
+    InvalidateDisplayDeviceCache();
+    g_lastLoggedHz = 0;
+    g_lastLoggedReason.clear();
+    g_lastLoggedAC = false;
+    g_lastLoggedBatt = 255;
+    g_lastLoggedSaver = false;
+}
+
 // ============================================================================
 // Windhawk Mod Lifecycle Entry Points
 // ============================================================================
 
 BOOL Wh_ModInit() {
     Wh_Log(L"Initializing Auto Refresh Rate mod (Version 1.0.0)...");
+
+    ResetModState();
 
     g_hMutex = CreateMutexW(nullptr, FALSE, g_szMutexName);
     if (!g_hMutex || GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -1995,7 +2062,9 @@ BOOL Wh_ModInit() {
             PostThreadMessageW(GetThreadId(g_hThread), WM_QUIT, 0, 0);
         }
         if (g_hThread) {
-            WaitForSingleObject(g_hThread, 5000);
+            if (WaitForSingleObject(g_hThread, 5000) != WAIT_OBJECT_0) {
+                TerminateThread(g_hThread, 1);
+            }
             CloseHandle(g_hThread);
             g_hThread = nullptr;
         }
@@ -2003,6 +2072,7 @@ BOOL Wh_ModInit() {
             CloseHandle(g_hMutex);
             g_hMutex = nullptr;
         }
+        ResetModState();
         return FALSE;
     }
 
@@ -2034,8 +2104,14 @@ void Wh_ModUninit() {
         g_hMutex = nullptr;
     }
 
-    // Restore displays to default settings recorded in registry upon mod unload
+    // Restore all active displays to default settings recorded in registry upon mod unload
+    for (const auto& dev : GetTargetDisplayDevices(true)) {
+        const WCHAR* pDev = dev.empty() ? nullptr : dev.c_str();
+        ChangeDisplaySettingsExW(pDev, nullptr, nullptr, 0, nullptr);
+    }
     ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
+
+    ResetModState();
 
     Wh_Log(L"Auto Refresh Rate mod uninitialized.");
 }
