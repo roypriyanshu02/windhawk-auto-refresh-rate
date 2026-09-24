@@ -332,9 +332,6 @@ static constexpr GUID GUID_OVERLAY_BEST_PERFORMANCE = {
 #ifndef PBT_POWERSETTINGCHANGE
 #define PBT_POWERSETTINGCHANGE 0x8013
 #endif
-#ifndef CDS_NORESET
-#define CDS_NORESET 0x10000000
-#endif
 #ifndef QDC_ONLY_ACTIVE_PATHS
 #define QDC_ONLY_ACTIVE_PATHS 0x00000002
 #endif
@@ -370,6 +367,7 @@ constexpr UINT_PTR TIMER_ID_TIME_CHECK          = 4;
 constexpr UINT_PTR TIMER_ID_FOREGROUND_DEBOUNCE = 6;
 constexpr UINT_PTR TIMER_ID_QUIET_SWITCH        = 7;
 constexpr UINT_PTR TIMER_ID_COOLDOWN_SWITCH     = 8;
+constexpr UINT_PTR TIMER_ID_INHIBIT_RECHECK     = 9;
 constexpr UINT_PTR TIMER_ID_TRAY_CLEANUP        = 10;
 
 
@@ -380,9 +378,11 @@ constexpr DWORD RESUME_DELAY_MS                 = 1000;
 constexpr DWORD DISPLAY_CHANGE_DELAY_MS         = 500;
 constexpr DWORD FOREGROUND_DEBOUNCE_MS          = 100;
 constexpr DWORD QUIET_SWITCH_TIMEOUT_MS         = 2000;
+constexpr DWORD INHIBIT_CACHE_TTL_MS            = 4000;
 constexpr DWORD HOTKEY_CYCLE_COOLDOWN_MS        = 500;
 constexpr DWORD MOUSE_DRAG_RETRY_MS             = 250;
 constexpr DWORD TIME_CHECK_INTERVAL_MS          = 30000;
+constexpr DWORD INHIBIT_RECHECK_INTERVAL_MS     = 2500;
 constexpr DWORD TRAY_ICON_LIFETIME_MS           = 5000;
 
 // ============================================================================
@@ -770,6 +770,7 @@ struct TimeOfDay {
     GetWindowThreadProcessId(hFore, &pid);
     std::wstring procName = GetProcessNameFromPID(pid);
 
+    // UWP apps run inside ApplicationFrameHost.exe. Inspect child CoreWindow to resolve actual package name.
     if (_wcsicmp(procName.c_str(), L"ApplicationFrameHost.exe") == 0) {
         HWND hChild = FindWindowExW(hFore, nullptr, L"Windows.UI.Core.CoreWindow", nullptr);
         if (hChild) {
@@ -787,11 +788,16 @@ struct TimeOfDay {
 static ULONGLONG s_lastInhibitCheckTick = 0;
 static std::optional<std::wstring> s_cachedInhibitMatch;
 
-[[nodiscard]] std::optional<std::wstring> CheckAppInRunningList(const std::vector<std::wstring>& list) {
+void InvalidateInhibitAppCache() noexcept {
+    s_lastInhibitCheckTick = 0;
+    s_cachedInhibitMatch = std::nullopt;
+}
+
+[[nodiscard]] std::optional<std::wstring> CheckAppInRunningList(std::span<const std::wstring> list) {
     if (list.empty()) return std::nullopt;
 
     ULONGLONG now = GetTickCount64();
-    if (s_lastInhibitCheckTick > 0 && (now - s_lastInhibitCheckTick < 4000)) {
+    if (s_lastInhibitCheckTick > 0 && (now - s_lastInhibitCheckTick < INHIBIT_CACHE_TTL_MS)) {
         return s_cachedInhibitMatch;
     }
     s_lastInhibitCheckTick = now;
@@ -829,7 +835,7 @@ static std::optional<std::wstring> s_cachedInhibitMatch;
             dmEnum.dmBitsPerPel == dmCurrent.dmBitsPerPel) {
 
             DWORD hz = dmEnum.dmDisplayFrequency;
-            if (std::find(outRates.begin(), outRates.end(), hz) == outRates.end()) {
+            if (hz > 1 && std::find(outRates.begin(), outRates.end(), hz) == outRates.end()) {
                 outRates.push_back(hz);
             }
             if (targetHz > 1) {
@@ -1206,7 +1212,9 @@ void LoadSettings() {
 // Target refresh rate evaluation policy
 // ============================================================================
 
-[[nodiscard]] DWORD EvaluateTargetRefreshRate(const PowerStateSnapshot& state, std::wstring& outReason, std::wstring& outBrief) {
+[[nodiscard]] DWORD EvaluateTargetRefreshRate(const PowerStateSnapshot& state, std::wstring& outReason, std::wstring& outBrief, bool& outIsInhibited) {
+    outIsInhibited = false;
+
     // 1. Manual hotkey lock
     if (g_manualOverrideActive && g_manualOverrideHz > 0) {
         outBrief = L"Manual lock";
@@ -1214,22 +1222,26 @@ void LoadSettings() {
         return g_manualOverrideHz;
     }
 
+    std::wstring foreProc;
+    if (g_settings.inhibitAppsEnabled || g_settings.appRulesEnabled || g_settings.autoGameBoost) {
+        foreProc = GetForegroundProcessName();
+    }
+
     // 2. Protected applications
     if (g_settings.inhibitAppsEnabled) {
-        std::wstring foreProc = GetForegroundProcessName();
         if (!foreProc.empty() && IsAppInList(foreProc, g_parsedInhibitApps)) {
-            DWORD currentHz = GetCurrentPrimaryRefreshRate();
             outBrief = L"Protected: " + FormatAppNameForDisplay(foreProc);
-            outReason = L"Protected app in focus ('" + foreProc + L"'), maintaining " + std::to_wstring(currentHz) + L" Hz";
-            return currentHz;
+            outReason = L"Protected app in focus ('" + foreProc + L"'), display switching inhibited";
+            outIsInhibited = true;
+            return GetCurrentPrimaryRefreshRate();
         }
 
         auto matchedInhibit = CheckAppInRunningList(g_parsedInhibitApps);
         if (matchedInhibit) {
-            DWORD currentHz = GetCurrentPrimaryRefreshRate();
             outBrief = L"Protected: " + FormatAppNameForDisplay(*matchedInhibit);
-            outReason = L"Protected app running ('" + *matchedInhibit + L"'), maintaining " + std::to_wstring(currentHz) + L" Hz";
-            return currentHz;
+            outReason = L"Protected app running ('" + *matchedInhibit + L"'), display switching inhibited";
+            outIsInhibited = true;
+            return GetCurrentPrimaryRefreshRate();
         }
     }
 
@@ -1257,11 +1269,6 @@ void LoadSettings() {
     }
 
     // 4. Foreground application rules
-    std::wstring foreProc;
-    if (g_settings.appRulesEnabled || g_settings.autoGameBoost) {
-        foreProc = GetForegroundProcessName();
-    }
-
     if (g_settings.appRulesEnabled && !foreProc.empty()) {
         if (IsAppInList(foreProc, g_parsedLowRefreshApps)) {
             outBrief = L"App saver: " + FormatAppNameForDisplay(foreProc);
@@ -1436,7 +1443,7 @@ void ShowNativeNotification(DWORD hz, const std::wstring& reasonBrief) {
     return devices;
 }
 
-[[nodiscard]] bool SetDisplayRefreshRate(const WCHAR* pDevice, DWORD targetHz, bool noReset = false, bool* pOutChanged = nullptr) {
+[[nodiscard]] bool SetDisplayRefreshRate(const WCHAR* pDevice, DWORD targetHz, bool* pOutChanged = nullptr) {
     if (pOutChanged) *pOutChanged = false;
 
     const WCHAR* pDevParam = (pDevice && *pDevice) ? pDevice : nullptr;
@@ -1475,8 +1482,7 @@ void ShowNativeNotification(DWORD hz, const std::wstring& reasonBrief) {
         return false;
     }
 
-    DWORD flags = (noReset ? CDS_NORESET : 0);
-    if (ChangeDisplaySettingsExW(pDevParam, &dmTarget, nullptr, flags, nullptr) == DISP_CHANGE_SUCCESSFUL) {
+    if (ChangeDisplaySettingsExW(pDevParam, &dmTarget, nullptr, 0, nullptr) == DISP_CHANGE_SUCCESSFUL) {
         if (pOutChanged) *pOutChanged = true;
         Wh_Log(L"Success: Display (%s) set to %u Hz.", pDevLog, resolved);
         return true;
@@ -1488,9 +1494,7 @@ void ApplyRefreshRateToTargets(DWORD targetHz, const std::wstring& reasonBrief, 
     auto devices = GetTargetDisplayDevices(g_settings.targetDisplayAll);
     if (devices.empty()) return;
 
-    bool isMulti = (g_settings.targetDisplayAll && devices.size() > 1);
-    bool anyStaged = false;
-    bool allStagesSucceeded = true;
+    bool anyChanged = false;
 
     for (const auto& dev : devices) {
         const WCHAR* pDev = dev.empty() ? nullptr : dev.c_str();
@@ -1500,35 +1504,55 @@ void ApplyRefreshRateToTargets(DWORD targetHz, const std::wstring& reasonBrief, 
         }
 
         bool changed = false;
-        if (!SetDisplayRefreshRate(pDev, devTargetHz, isMulti, &changed)) {
-            allStagesSucceeded = false;
-        } else if (changed) {
-            anyStaged = true;
+        if (SetDisplayRefreshRate(pDev, devTargetHz, &changed) && changed) {
+            anyChanged = true;
         }
     }
 
-    bool commitSuccessful = false;
-    if (isMulti) {
-        if (anyStaged) {
-            if (allStagesSucceeded && ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr) == DISP_CHANGE_SUCCESSFUL) {
-                commitSuccessful = true;
-            } else {
-                Wh_Log(L"Multi-display refresh rate commit failed or partial stage failure. Reverting staged changes...");
-                ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
-            }
-        }
-    } else {
-        commitSuccessful = anyStaged;
-    }
-
-    if (commitSuccessful) {
+    if (anyChanged) {
         g_lastSuccessfulSwitchTick = GetTickCount64();
     }
 
-    if (commitSuccessful || forceNotification) {
+    if (anyChanged || forceNotification) {
         DWORD notifHz = (targetHz == 0) ? GetCurrentPrimaryRefreshRate() : targetHz;
         ShowNativeNotification(notifHz, reasonBrief);
     }
+}
+
+[[nodiscard]] bool AnyDisplayNeedsChange(DWORD targetHz, bool* pOutIsDrop = nullptr) {
+    if (pOutIsDrop) *pOutIsDrop = false;
+    auto devices = GetTargetDisplayDevices(g_settings.targetDisplayAll);
+    for (const auto& dev : devices) {
+        const WCHAR* pDev = dev.empty() ? nullptr : dev.c_str();
+        DWORD devTargetHz = targetHz;
+        if (!g_manualOverrideActive && !g_state.isAC && g_settings.smartDockingEnabled && !IsInternalDisplayDevice(pDev)) {
+            devTargetHz = (g_settings.targetAC == 0) ? GetMaxRefreshRate(pDev) : g_settings.targetAC;
+        }
+
+        DEVMODEW dmCurrent = {};
+        dmCurrent.dmSize = sizeof(dmCurrent);
+        if (!EnumDisplaySettingsExW(pDev, ENUM_CURRENT_SETTINGS, &dmCurrent, EDS_ROTATEDMODE)) {
+            continue;
+        }
+
+        if (devTargetHz > 1 && (dmCurrent.dmDisplayFrequency == devTargetHz ||
+            std::abs(static_cast<int>(dmCurrent.dmDisplayFrequency) - static_cast<int>(devTargetHz)) <= 1)) {
+            continue;
+        }
+
+        std::vector<DWORD> supported;
+        DWORD resolved = ResolveRefreshRate(pDev, devTargetHz, dmCurrent, supported);
+        if (resolved == 0) continue;
+
+        if (dmCurrent.dmDisplayFrequency != resolved &&
+            std::abs(static_cast<int>(dmCurrent.dmDisplayFrequency) - static_cast<int>(resolved)) > 1) {
+            if (pOutIsDrop && resolved < dmCurrent.dmDisplayFrequency) {
+                *pOutIsDrop = true;
+            }
+            return true;
+        }
+    }
+    return false;
 }
 
 void SynchronizeAndApplyPolicy(bool forceNotification, const std::wstring& forcedBrief) {
@@ -1549,12 +1573,32 @@ void SynchronizeAndApplyPolicy(bool forceNotification, const std::wstring& force
     g_state.powerScheme = QueryEffectivePowerPersonality(g_state.isAC);
 
     std::wstring reason, brief;
-    DWORD targetHz = EvaluateTargetRefreshRate(g_state, reason, brief);
+    bool isInhibited = false;
+    DWORD targetHz = EvaluateTargetRefreshRate(g_state, reason, brief, isInhibited);
     if (!forcedBrief.empty()) brief = forcedBrief;
 
-    DWORD currentHz = GetCurrentPrimaryRefreshRate();
-    bool wouldChangeRate = (targetHz != currentHz &&
-                            std::abs(static_cast<int>(targetHz) - static_cast<int>(currentHz)) > 1);
+    static bool s_lastInhibited = false;
+    if (isInhibited) {
+        if (g_hWnd) {
+            SetTimer(g_hWnd, TIMER_ID_INHIBIT_RECHECK, INHIBIT_RECHECK_INTERVAL_MS, nullptr);
+            KillTimer(g_hWnd, TIMER_ID_QUIET_SWITCH);
+            KillTimer(g_hWnd, TIMER_ID_COOLDOWN_SWITCH);
+        }
+        PrintStatusDashboard(g_state, targetHz, reason);
+        if (!s_lastInhibited) {
+            Wh_Log(L"Auto Refresh Rate: Switching inhibited by protected application. Periodic re-checks scheduled.");
+            s_lastInhibited = true;
+        }
+        return;
+    }
+    s_lastInhibited = false;
+
+    if (g_hWnd) {
+        KillTimer(g_hWnd, TIMER_ID_INHIBIT_RECHECK);
+    }
+
+    bool isDrop = false;
+    bool wouldChangeRate = AnyDisplayNeedsChange(targetHz, &isDrop);
 
     if (wouldChangeRate && !forceNotification) {
         ULONGLONG now64 = GetTickCount64();
@@ -1582,23 +1626,20 @@ void SynchronizeAndApplyPolicy(bool forceNotification, const std::wstring& force
         }
 
         // Quiet switching: defer until user input is idle
-        if (g_settings.quietSwitchEnabled) {
-            bool isDrop = (targetHz < currentHz);
-            if (isDrop) {
-                LASTINPUTINFO lii = { sizeof(lii) };
-                if (GetLastInputInfo(&lii)) {
-                    DWORD now32 = static_cast<DWORD>(now64);
-                    DWORD inactiveMs = now32 - lii.dwTime;
-                    if (inactiveMs < QUIET_SWITCH_TIMEOUT_MS) {
-                        DWORD waitMs = QUIET_SWITCH_TIMEOUT_MS - inactiveMs + 100;
-                        if (waitMs < 250) waitMs = 250;
-                        if (g_hWnd) {
-                            SetTimer(g_hWnd, TIMER_ID_QUIET_SWITCH, waitMs, nullptr);
-                        }
-                        Wh_Log(L"User active (input %u ms ago, threshold %u ms). Deferring switch to %u Hz until idle.",
-                               inactiveMs, QUIET_SWITCH_TIMEOUT_MS, targetHz);
-                        return;
+        if (g_settings.quietSwitchEnabled && isDrop) {
+            LASTINPUTINFO lii = { sizeof(lii) };
+            if (GetLastInputInfo(&lii)) {
+                DWORD now32 = static_cast<DWORD>(now64);
+                DWORD inactiveMs = now32 - lii.dwTime;
+                if (inactiveMs < QUIET_SWITCH_TIMEOUT_MS) {
+                    DWORD waitMs = QUIET_SWITCH_TIMEOUT_MS - inactiveMs + 100;
+                    if (waitMs < 250) waitMs = 250;
+                    if (g_hWnd) {
+                        SetTimer(g_hWnd, TIMER_ID_QUIET_SWITCH, waitMs, nullptr);
                     }
+                    Wh_Log(L"User active (input %u ms ago, threshold %u ms). Deferring switch to %u Hz until idle.",
+                           inactiveMs, QUIET_SWITCH_TIMEOUT_MS, targetHz);
+                    return;
                 }
             }
         }
@@ -1610,6 +1651,9 @@ void SynchronizeAndApplyPolicy(bool forceNotification, const std::wstring& force
     }
 
     PrintStatusDashboard(g_state, targetHz, reason);
+    if (!wouldChangeRate && !forceNotification) {
+        return;
+    }
     ApplyRefreshRateToTargets(targetHz, brief, forceNotification);
 }
 
@@ -1666,7 +1710,9 @@ void CycleRefreshRatesViaHotkey() {
 VOID CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND, LONG, LONG, DWORD, DWORD) {
     if (event == EVENT_SYSTEM_FOREGROUND && g_hWnd) {
         if (!g_foregroundPending.exchange(true)) {
-            PostMessageW(g_hWnd, WM_APP_FOREGROUND_CHANGED, 0, 0);
+            if (!PostMessageW(g_hWnd, WM_APP_FOREGROUND_CHANGED, 0, 0)) {
+                g_foregroundPending.store(false);
+            }
         }
     }
 }
@@ -1783,6 +1829,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
             KillTimer(hWnd, wParam);
             SynchronizeAndApplyPolicy();
             return 0;
+        } else if (wParam == TIMER_ID_INHIBIT_RECHECK) {
+            KillTimer(hWnd, TIMER_ID_INHIBIT_RECHECK);
+            InvalidateInhibitAppCache();
+            SynchronizeAndApplyPolicy();
+            return 0;
         } else if (wParam == TIMER_ID_TRAY_CLEANUP) {
             KillTimer(hWnd, TIMER_ID_TRAY_CLEANUP);
             RemoveNativeNotificationIcon();
@@ -1802,6 +1853,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
         KillTimer(hWnd, TIMER_ID_TIME_CHECK);
         KillTimer(hWnd, TIMER_ID_QUIET_SWITCH);
         KillTimer(hWnd, TIMER_ID_COOLDOWN_SWITCH);
+        KillTimer(hWnd, TIMER_ID_INHIBIT_RECHECK);
         KillTimer(hWnd, TIMER_ID_TRAY_CLEANUP);
 
         UnregisterHotKey(hWnd, HOTKEY_ID_CYCLE);
@@ -1816,6 +1868,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
         return 0;
 
     case WM_DESTROY:
+        g_foregroundPending.store(false);
         g_hWnd.store(nullptr);
         PostQuitMessage(0);
         return 0;
@@ -1857,9 +1910,13 @@ DWORD WINAPI PowerMonitorThreadProc(LPVOID lpParam) {
         }
     }
 
+    g_foregroundPending.store(false);
+
+    // Omit WINEVENT_SKIPOWNPROCESS: the mod runs inside explorer.exe, so skipping the host
+    // process would prevent detecting focus switches to the Desktop, Taskbar, and Start Menu.
     g_hWinEventHook = SetWinEventHook(
         EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, WinEventProc,
-        0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+        0, 0, WINEVENT_OUTOFCONTEXT);
 
     if (g_settings.timeScheduleEnabled) {
         SetTimer(hWnd, TIMER_ID_TIME_CHECK, TIME_CHECK_INTERVAL_MS, nullptr);
