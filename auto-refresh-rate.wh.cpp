@@ -205,6 +205,10 @@ For bug reports, feature requests, and source code, visit the **[GitHub reposito
 #include <objbase.h>
 #include <powrprof.h>
 #include <tlhelp32.h>
+
+#ifndef DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+#define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 ((DPI_AWARENESS_CONTEXT)-4)
+#endif
 #include <vector>
 #include <string>
 #include <string_view>
@@ -1180,10 +1184,8 @@ void LoadSettings() {
         UnregisterHotKey(hWnd, HOTKEY_ID_CYCLE);
         if (g_settings.globalHotkeyEnabled) {
             if (!RegisterHotKey(hWnd, HOTKEY_ID_CYCLE, g_settings.hotkeyModifiers | MOD_NOREPEAT, g_settings.hotkeyVk)) {
-                if (!RegisterHotKey(hWnd, HOTKEY_ID_CYCLE, g_settings.hotkeyModifiers, g_settings.hotkeyVk)) {
-                    Wh_Log(L"Failed to register hotkey '%s' (mod=0x%X, vk=0x%X). Combination may be reserved.",
-                           g_settings.globalHotkey.c_str(), g_settings.hotkeyModifiers, g_settings.hotkeyVk);
-                }
+                Wh_Log(L"Failed to register hotkey '%s' (mod=0x%X, vk=0x%X). Combination may be reserved.",
+                       g_settings.globalHotkey.c_str(), g_settings.hotkeyModifiers, g_settings.hotkeyVk);
             }
         }
     }
@@ -1920,6 +1922,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 }
 
 DWORD WINAPI PowerMonitorThreadProc(LPVOID lpParam) {
+    SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
     HANDLE hInitEvent = static_cast<HANDLE>(lpParam);
     HINSTANCE hInstance = GetModuleHandleW(nullptr);
 
@@ -1928,7 +1932,8 @@ DWORD WINAPI PowerMonitorThreadProc(LPVOID lpParam) {
     wc.hInstance = hInstance;
     wc.lpszClassName = g_szClassName;
 
-    if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+    if (!RegisterClassExW(&wc)) {
+        Wh_Log(L"Failed to register window class '%s' (error %lu).", g_szClassName, GetLastError());
         if (hInitEvent) SetEvent(hInitEvent);
         return 1;
     }
@@ -1949,7 +1954,8 @@ DWORD WINAPI PowerMonitorThreadProc(LPVOID lpParam) {
 
     if (g_settings.globalHotkeyEnabled) {
         if (!RegisterHotKey(hWnd, HOTKEY_ID_CYCLE, g_settings.hotkeyModifiers | MOD_NOREPEAT, g_settings.hotkeyVk)) {
-            RegisterHotKey(hWnd, HOTKEY_ID_CYCLE, g_settings.hotkeyModifiers, g_settings.hotkeyVk);
+            Wh_Log(L"Failed to register hotkey '%s' (mod=0x%X, vk=0x%X). Combination may be reserved.",
+                   g_settings.globalHotkey.c_str(), g_settings.hotkeyModifiers, g_settings.hotkeyVk);
         }
     }
 
