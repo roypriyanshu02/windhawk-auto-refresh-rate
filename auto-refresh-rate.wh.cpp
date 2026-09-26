@@ -10,7 +10,7 @@
 // @architecture    x86-64
 // @architecture    arm64
 // @architecture    x86
-// @compilerOptions -std=c++20 -lole32 -lgdi32 -luuid -luser32 -ladvapi32 -lpowrprof -lshell32
+// @compilerOptions -std=c++20 -lole32 -lgdi32 -luser32 -ladvapi32 -lpowrprof -lshell32
 // @license         MIT
 // ==/WindhawkMod==
 
@@ -188,11 +188,8 @@ For bug reports, feature requests, and source code, visit the **[GitHub reposito
     - GlobalHotkey: "Win+Ctrl+R"
       $name: "Hotkey combination"
       $description: "Key combination to cycle rates (e.g. Win+Ctrl+R, Ctrl+Alt+R)."
-    - VerboseLogging: true
-      $name: "Verbose event logging"
-      $description: "Log power transitions and refresh rate events to the Windhawk log."
   $name: "Shortcuts & notifications"
-  $description: "On-screen badge, keyboard shortcuts, and event logging."
+  $description: "Windows notifications and keyboard shortcuts."
 */
 // ==/WindhawkModSettings==
 
@@ -206,7 +203,6 @@ For bug reports, feature requests, and source code, visit the **[GitHub reposito
 #include <windows.h>
 #include <shellapi.h>
 #include <objbase.h>
-#include <winuser.h>
 #include <powrprof.h>
 #include <tlhelp32.h>
 #include <vector>
@@ -289,7 +285,6 @@ struct ScopedRegKey {
         return *this;
     }
     [[nodiscard]] HKEY get() const noexcept { return m_k; }
-    [[nodiscard]] HKEY* addressof() noexcept { return &m_k; }
     [[nodiscard]] explicit operator bool() const noexcept { return m_k != nullptr; }
 };
 
@@ -419,7 +414,6 @@ struct ModSettings {
     bool timeScheduleEnabled = false;
     std::wstring scheduleStart = L"22:00";
     std::wstring scheduleEnd = L"07:00";
-    bool verboseLogging = true;
 };
 
 struct PowerStateSnapshot {
@@ -1096,7 +1090,7 @@ void LoadSettings() {
     g_settings.chargeSwitchingEnabled = ReadBoolSettingSafe(L"PowerAndBattery.ChargeSwitchingEnabled", true);
 
     std::wstring acRateStr = ReadStringSettingSafe(L"PowerAndBattery.PluggedInRate", L"max");
-    if (acRateStr == L"max" || acRateStr == L"auto") {
+    if (acRateStr == L"max") {
         g_settings.targetAC = 0; // 0 = automatic highest supported
     } else if (acRateStr == L"custom") {
         int customAc = ReadIntSettingSafe(L"PowerAndBattery.CustomPluggedInRate", 144);
@@ -1121,7 +1115,7 @@ void LoadSettings() {
 
     g_settings.energySaverEnabled = ReadBoolSettingSafe(L"PowerAndBattery.EnergySaverEnabled", true);
     g_settings.energySaverAction = ReadStringSettingSafe(L"PowerAndBattery.EnergySaverRate", L"60");
-    if (g_settings.energySaverAction == L"force_low" || g_settings.energySaverAction.empty()) {
+    if (g_settings.energySaverAction.empty()) {
         g_settings.energySaverAction = L"60";
     }
     if (g_settings.energySaverAction == L"custom") {
@@ -1170,12 +1164,10 @@ void LoadSettings() {
         g_settings.hotkeyModifiers = parsedMod;
         g_settings.hotkeyVk = parsedVk;
     } else {
-        Wh_Log(L"Auto Refresh Rate: Invalid hotkey '%s'. Falling back to Win+Ctrl+R.", g_settings.globalHotkey.c_str());
+        Wh_Log(L"Invalid hotkey '%s'. Falling back to Win+Ctrl+R.", g_settings.globalHotkey.c_str());
         g_settings.hotkeyModifiers = MOD_WIN | MOD_CONTROL;
         g_settings.hotkeyVk = 'R';
     }
-
-    g_settings.verboseLogging = ReadBoolSettingSafe(L"ShortcutsAndNotifications.VerboseLogging", true);
 
     HWND hWnd = g_hWnd.load();
     if (hWnd) {
@@ -1189,14 +1181,14 @@ void LoadSettings() {
         if (g_settings.globalHotkeyEnabled) {
             if (!RegisterHotKey(hWnd, HOTKEY_ID_CYCLE, g_settings.hotkeyModifiers | MOD_NOREPEAT, g_settings.hotkeyVk)) {
                 if (!RegisterHotKey(hWnd, HOTKEY_ID_CYCLE, g_settings.hotkeyModifiers, g_settings.hotkeyVk)) {
-                    Wh_Log(L"Auto Refresh Rate: Failed to register hotkey '%s' (mod=0x%X, vk=0x%X). Combination may be reserved.",
+                    Wh_Log(L"Failed to register hotkey '%s' (mod=0x%X, vk=0x%X). Combination may be reserved.",
                            g_settings.globalHotkey.c_str(), g_settings.hotkeyModifiers, g_settings.hotkeyVk);
                 }
             }
         }
     }
 
-    Wh_Log(L"Auto Refresh Rate Settings loaded: PluggedIn=%s, Battery=%s, EnergySaver=%s, GameBoost=%s, AppRules=%s, QuietSwitch=%s, Inhibit=%s, Notification=%s, Hotkey=%s",
+    Wh_Log(L"Settings loaded: PluggedIn=%s, Battery=%s, EnergySaver=%s, GameBoost=%s, AppRules=%s, QuietSwitch=%s, Inhibit=%s, Notification=%s, Hotkey=%s",
            (g_settings.targetAC == 0 ? L"Max" : std::to_wstring(g_settings.targetAC).c_str()),
            (g_settings.targetDC == 1 ? L"Min" : (g_settings.targetDC == 0 ? L"MatchAC" : std::to_wstring(g_settings.targetDC).c_str())),
            g_settings.energySaverAction.c_str(),
@@ -1231,7 +1223,7 @@ void LoadSettings() {
     DWORD displayDC = (g_settings.targetDC == 1) ? GetMinRefreshRate() : ((g_settings.targetDC == 0) ? displayAC : g_settings.targetDC);
 
     // 3. Windows Energy Saver
-    if (g_settings.energySaverEnabled && state.isBatterySaverActive && g_settings.energySaverAction != L"ignore") {
+    if (g_settings.energySaverEnabled && state.isBatterySaverActive) {
         DWORD resolvedSaver = 60;
         if (g_settings.energySaverAction == L"min") {
             resolvedSaver = 1; // 1 = lowest supported sentinel
@@ -1314,8 +1306,6 @@ static BYTE g_lastLoggedBatt = 255;
 static bool g_lastLoggedSaver = false;
 
 void PrintStatusDashboard(const PowerStateSnapshot& state, DWORD targetHz, const std::wstring& reason) {
-    if (!g_settings.verboseLogging) return;
-
     if (targetHz == g_lastLoggedHz &&
         reason == g_lastLoggedReason &&
         state.isAC == g_lastLoggedAC &&
@@ -1343,7 +1333,7 @@ void PrintStatusDashboard(const PowerStateSnapshot& state, DWORD targetHz, const
     EnumDisplaySettingsExW(primary[0] ? primary : nullptr, ENUM_CURRENT_SETTINGS, &dm, EDS_ROTATEDMODE);
 
     Wh_Log(L"================================================================================");
-    Wh_Log(L"Auto Refresh Rate Dashboard | Target: %u Hz | Reason: %s", targetHz, reason.c_str());
+    Wh_Log(L"Dashboard | Target: %u Hz | Reason: %s", targetHz, reason.c_str());
     Wh_Log(L"  Primary Monitor  : %s (%ux%u @ %u Hz)", primary[0] ? primary : L"Default", dm.dmPelsWidth, dm.dmPelsHeight, dm.dmDisplayFrequency);
     Wh_Log(L"  Power Source     : %s (Battery: %u%%) | Energy Saver: %s", state.isAC ? L"AC" : L"Battery", state.batteryPercent, state.isBatterySaverActive ? L"ON" : L"OFF");
     Wh_Log(L"================================================================================");
@@ -1643,7 +1633,7 @@ void SynchronizeAndApplyPolicy(bool forceNotification, const std::wstring& force
         }
         PrintStatusDashboard(g_state, targetHz, reason);
         if (!s_lastInhibited) {
-            Wh_Log(L"Auto Refresh Rate: Switching inhibited by protected application. Re-checking when application closes.");
+            Wh_Log(L"Switching inhibited by protected application. Re-checking when application closes.");
             s_lastInhibited = true;
         }
         return;
@@ -2018,7 +2008,7 @@ void ResetModState() noexcept {
 // ============================================================================
 
 BOOL Wh_ModInit() {
-    Wh_Log(L"Initializing Auto Refresh Rate mod (Version 1.0.0)...");
+    Wh_Log(L"Initializing mod (Version 1.0.0)...");
 
     ResetModState();
 
@@ -2028,7 +2018,7 @@ BOOL Wh_ModInit() {
             CloseHandle(g_hMutex);
             g_hMutex = nullptr;
         }
-        Wh_Log(L"Auto Refresh Rate mod is already active or failed to acquire mutex.");
+        Wh_Log(L"Mod is already active or failed to acquire mutex.");
         return FALSE;
     }
 
@@ -2076,7 +2066,7 @@ BOOL Wh_ModInit() {
         return FALSE;
     }
 
-    Wh_Log(L"Auto Refresh Rate mod initialized.");
+    Wh_Log(L"Mod initialized.");
     return TRUE;
 }
 
@@ -2113,5 +2103,5 @@ void Wh_ModUninit() {
 
     ResetModState();
 
-    Wh_Log(L"Auto Refresh Rate mod uninitialized.");
+    Wh_Log(L"Mod uninitialized.");
 }
