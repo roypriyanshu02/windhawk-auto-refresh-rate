@@ -457,6 +457,8 @@ static std::atomic<bool> s_trayIconActive{false};
 
 
 
+static std::vector<std::pair<std::wstring, DEVMODEW>> g_initialDisplayModes;
+
 void SynchronizeAndApplyPolicy(bool forceNotification = false, const std::wstring& forcedBrief = L"");
 void ShowNativeNotification(DWORD hz, const std::wstring& reasonBrief);
 void RemoveNativeNotificationIcon() noexcept;
@@ -1870,6 +1872,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
             return 0;
         } else if (wParam == TIMER_ID_DISPLAY_CHANGE) {
             KillTimer(hWnd, TIMER_ID_DISPLAY_CHANGE);
+            for (const auto& dev : GetTargetDisplayDevices(true)) {
+                auto it = std::find_if(g_initialDisplayModes.begin(), g_initialDisplayModes.end(),
+                    [&](const auto& pair) { return pair.first == dev; });
+                if (it == g_initialDisplayModes.end()) {
+                    const WCHAR* pDev = dev.empty() ? nullptr : dev.c_str();
+                    DEVMODEW dm = {};
+                    dm.dmSize = sizeof(dm);
+                    if (EnumDisplaySettingsExW(pDev, ENUM_CURRENT_SETTINGS, &dm, EDS_ROTATEDMODE)) {
+                        g_initialDisplayModes.emplace_back(dev, dm);
+                    }
+                }
+            }
             SynchronizeAndApplyPolicy();
             return 0;
         } else if (wParam == TIMER_ID_TIME_CHECK) {
@@ -1895,7 +1909,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
         SynchronizeAndApplyPolicy();
         return 0;
 
-    case WM_CLOSE:
+    case WM_CLOSE: {
         KillTimer(hWnd, TIMER_ID_POWER_DEBOUNCE);
         KillTimer(hWnd, TIMER_ID_FOREGROUND_DEBOUNCE);
         KillTimer(hWnd, TIMER_ID_RESUME_SYNC);
@@ -1914,8 +1928,31 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
         UnregisterAllPowerNotifications();
 
         RemoveNativeNotificationIcon();
+
+        // Restore original display frequencies if modified
+        bool anyRestored = false;
+        for (const auto& [devName, dmInit] : g_initialDisplayModes) {
+            const WCHAR* pDev = devName.empty() ? nullptr : devName.c_str();
+            DEVMODEW dmCur = {};
+            dmCur.dmSize = sizeof(dmCur);
+            if (EnumDisplaySettingsExW(pDev, ENUM_CURRENT_SETTINGS, &dmCur, EDS_ROTATEDMODE)) {
+                if (dmCur.dmDisplayFrequency != dmInit.dmDisplayFrequency) {
+                    DEVMODEW dmRestore = dmInit;
+                    dmRestore.dmFields |= DM_DISPLAYFREQUENCY;
+                    if (ChangeDisplaySettingsExW(pDev, &dmRestore, nullptr, CDS_UPDATEREGISTRY | CDS_NORESET, nullptr) == DISP_CHANGE_SUCCESSFUL) {
+                        anyRestored = true;
+                    }
+                }
+            }
+        }
+        if (anyRestored) {
+            ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
+        }
+        g_initialDisplayModes.clear();
+
         DestroyWindow(hWnd);
         return 0;
+    }
 
     case WM_DESTROY:
         g_hWnd.store(nullptr);
@@ -2011,6 +2048,7 @@ void ResetModState() noexcept {
     g_lastLoggedAC = false;
     g_lastLoggedBatt = 255;
     g_lastLoggedSaver = false;
+    g_initialDisplayModes.clear();
 }
 
 // ============================================================================
@@ -2033,6 +2071,16 @@ BOOL Wh_ModInit() {
     }
 
     LoadSettings();
+
+    g_initialDisplayModes.clear();
+    for (const auto& dev : GetTargetDisplayDevices(true)) {
+        const WCHAR* pDev = dev.empty() ? nullptr : dev.c_str();
+        DEVMODEW dm = {};
+        dm.dmSize = sizeof(dm);
+        if (EnumDisplaySettingsExW(pDev, ENUM_CURRENT_SETTINGS, &dm, EDS_ROTATEDMODE)) {
+            g_initialDisplayModes.emplace_back(dev, dm);
+        }
+    }
 
     ScopedHandle hInitEvent(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     if (!hInitEvent) {
@@ -2103,13 +2151,6 @@ void Wh_ModUninit() {
         CloseHandle(g_hMutex);
         g_hMutex = nullptr;
     }
-
-    // Restore all active displays to default settings recorded in registry upon mod unload
-    for (const auto& dev : GetTargetDisplayDevices(true)) {
-        const WCHAR* pDev = dev.empty() ? nullptr : dev.c_str();
-        ChangeDisplaySettingsExW(pDev, nullptr, nullptr, 0, nullptr);
-    }
-    ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
 
     ResetModState();
 
