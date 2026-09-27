@@ -136,7 +136,7 @@ For bug reports, feature requests, and source code, visit the **[GitHub reposito
       $description: "Apps that boost to maximum refresh rate when focused. Separate names with semicolons (e.g. cs2; blender)."
     - LowRefreshApps: "vlc; mpc-hc64; netflix; acrobat"
       $name: "Low-refresh apps"
-      $description: "Apps locked to battery refresh rate when focused. Separate names with semicolons (e.g. vlc; acrobat)."
+      $description: "Apps locked to battery refresh rate when focused. These apps also suppress fullscreen game boost when in fullscreen mode. Separate names with semicolons (e.g. vlc; acrobat)."
     - InhibitAppsEnabled: true
       $name: "Protected apps lock"
       $description: "Pause display switching while capture or presentation tools run."
@@ -1262,10 +1262,14 @@ void LoadSettings() {
     if (g_settings.autoGameBoost) {
         auto fsProc = IsForegroundWindowFullscreen(foreProc);
         if (fsProc) {
-            std::wstring gameName = fsProc->empty() ? L"Fullscreen" : *fsProc;
-            outBrief = L"Game: " + FormatAppNameForDisplay(gameName);
-            outReason = L"Fullscreen game detected ('" + gameName + L"' -> " + std::to_wstring(displayAC) + L" Hz)";
-            return g_settings.targetAC;
+            if (!fsProc->empty() && IsAppInList(*fsProc, g_parsedLowRefreshApps)) {
+                // Low-refresh app (e.g. video player) in fullscreen; suppress boost and fall through
+            } else {
+                std::wstring gameName = fsProc->empty() ? L"Fullscreen" : *fsProc;
+                outBrief = L"Game: " + FormatAppNameForDisplay(gameName);
+                outReason = L"Fullscreen game detected ('" + gameName + L"' -> " + std::to_wstring(displayAC) + L" Hz)";
+                return g_settings.targetAC;
+            }
         }
     }
 
