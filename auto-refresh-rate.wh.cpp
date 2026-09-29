@@ -305,6 +305,24 @@ struct ScopedDcState {
     ScopedDcState& operator=(const ScopedDcState&) = delete;
 };
 
+struct ScopedMutexOwnership {
+    HANDLE m_h = nullptr;
+    bool m_owned = false;
+    explicit ScopedMutexOwnership(HANDLE h) noexcept : m_h(h) {
+        if (m_h) {
+            DWORD res = ::WaitForSingleObject(m_h, INFINITE);
+            m_owned = (res == WAIT_OBJECT_0 || res == WAIT_ABANDONED);
+        }
+    }
+    ~ScopedMutexOwnership() noexcept {
+        if (m_owned && m_h) {
+            ::ReleaseMutex(m_h);
+        }
+    }
+    ScopedMutexOwnership(const ScopedMutexOwnership&) = delete;
+    ScopedMutexOwnership& operator=(const ScopedMutexOwnership&) = delete;
+};
+
 // GUID Definitions
 static constexpr GUID GUID_NULL_LOCAL = {
     0x00000000, 0x0000, 0x0000, { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }
@@ -380,6 +398,9 @@ constexpr DWORD QUIET_SWITCH_TIMEOUT_MS         = 2000;
 constexpr DWORD INHIBIT_CACHE_TTL_MS            = 4000;
 constexpr DWORD HOTKEY_CYCLE_COOLDOWN_MS        = 500;
 constexpr DWORD MOUSE_DRAG_RETRY_MS             = 250;
+constexpr DWORD UNINIT_JOIN_TIMEOUT_MS          = 5000;
+constexpr DWORD UNINIT_WINDOW_WAIT_ITERATIONS   = 20;
+constexpr DWORD UNINIT_WINDOW_WAIT_STEP_MS      = 10;
 constexpr DWORD TIME_CHECK_INTERVAL_MS          = 30000;
 constexpr DWORD INHIBIT_RECHECK_INTERVAL_MS     = 5000;
 constexpr DWORD TRAY_ICON_LIFETIME_MS           = 5000;
@@ -434,10 +455,11 @@ static std::vector<std::wstring> g_parsedLowRefreshApps;
 static std::vector<std::wstring> g_parsedInhibitApps;
 static ULONGLONG g_lastSuccessfulSwitchTick = 0;
 
-static HANDLE g_hMutex = nullptr;
 static HANDLE g_hThread = nullptr;
 static std::atomic<HWND> g_hWnd{nullptr};
+static std::atomic<bool> g_stopRequested{false};
 static HWINEVENTHOOK g_hWinEventHook = nullptr;
+extern HANDLE g_toolModProcessMutex;
 
 static constexpr std::array<const GUID*, 4> g_powerGuids = {
     &GUID_ACDC_POWER_SOURCE_LOCAL,
@@ -448,7 +470,6 @@ static constexpr std::array<const GUID*, 4> g_powerGuids = {
 static std::array<HPOWERNOTIFY, 4> g_hPowerNotify = {};
 
 static constexpr WCHAR g_szClassName[] = L"Windhawk_AutoRefreshRate_MsgWnd";
-static constexpr WCHAR g_szMutexName[] = L"Local\\Windhawk_AutoRefreshRate_PowerMonitor";
 
 static bool g_manualOverrideActive = false;
 static DWORD g_manualOverrideHz = 0;
@@ -1764,8 +1785,9 @@ void CycleRefreshRatesViaHotkey() {
 }
 
 VOID CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND, LONG, LONG, DWORD, DWORD) {
-    if (event == EVENT_SYSTEM_FOREGROUND && g_hWnd) {
-        PostMessageW(g_hWnd, WM_APP_FOREGROUND_CHANGED, 0, 0);
+    HWND hWnd = g_hWnd.load();
+    if (event == EVENT_SYSTEM_FOREGROUND && hWnd) {
+        PostMessageW(hWnd, WM_APP_FOREGROUND_CHANGED, 0, 0);
     }
 }
 
@@ -1962,10 +1984,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     return DefWindowProcW(hWnd, uMsg, wParam, lParam);
 }
 
-DWORD WINAPI PowerMonitorThreadProc(LPVOID lpParam) {
-    SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+DWORD WINAPI PowerMonitorThreadProc(LPVOID /*lpParam*/) {
+    Wh_Log(L"Power monitor thread active (TID %lu).", GetCurrentThreadId());
 
-    HANDLE hInitEvent = static_cast<HANDLE>(lpParam);
+    ScopedMutexOwnership mutexOwnership{g_toolModProcessMutex};
+
+    SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    if (g_stopRequested.load()) return 0;
+
+    LoadSettings();
+
+    if (g_stopRequested.load()) return 0;
+
     HINSTANCE hInstance = GetModuleHandleW(nullptr);
 
     WNDCLASSEXW wc = { sizeof(wc) };
@@ -1973,9 +2003,8 @@ DWORD WINAPI PowerMonitorThreadProc(LPVOID lpParam) {
     wc.hInstance = hInstance;
     wc.lpszClassName = g_szClassName;
 
-    if (!RegisterClassExW(&wc)) {
+    if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
         Wh_Log(L"Failed to register window class '%s' (error %lu).", g_szClassName, GetLastError());
-        if (hInitEvent) SetEvent(hInitEvent);
         return 1;
     }
 
@@ -1985,12 +2014,25 @@ DWORD WINAPI PowerMonitorThreadProc(LPVOID lpParam) {
         nullptr, nullptr, hInstance, nullptr);
 
     if (!hWnd) {
+        Wh_Log(L"Failed to create window (error %lu).", GetLastError());
         UnregisterClassW(g_szClassName, hInstance);
-        if (hInitEvent) SetEvent(hInitEvent);
         return 1;
     }
 
     g_hWnd.store(hWnd);
+    Wh_Log(L"Power monitor window created (HWND 0x%p).", hWnd);
+
+    g_initialDisplayModes.clear();
+    for (const auto& dev : GetTargetDisplayDevices(true)) {
+        if (g_stopRequested.load()) return 0;
+        const WCHAR* pDev = dev.empty() ? nullptr : dev.c_str();
+        DEVMODEW dm = {};
+        dm.dmSize = sizeof(dm);
+        if (EnumDisplaySettingsExW(pDev, ENUM_CURRENT_SETTINGS, &dm, EDS_ROTATEDMODE)) {
+            g_initialDisplayModes.emplace_back(dev, dm);
+        }
+    }
+
     RegisterAllPowerNotifications(hWnd);
 
     if (g_settings.globalHotkeyEnabled) {
@@ -2008,9 +2050,9 @@ DWORD WINAPI PowerMonitorThreadProc(LPVOID lpParam) {
         SetTimer(hWnd, TIMER_ID_TIME_CHECK, TIME_CHECK_INTERVAL_MS, nullptr);
     }
 
-    if (hInitEvent) SetEvent(hInitEvent);
-
-    SynchronizeAndApplyPolicy();
+    if (!g_stopRequested.load()) {
+        SynchronizeAndApplyPolicy();
+    }
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
@@ -2031,16 +2073,19 @@ DWORD WINAPI PowerMonitorThreadProc(LPVOID lpParam) {
         DestroyWindow(hCur);
     }
     UnregisterClassW(g_szClassName, hInstance);
+    Wh_Log(L"Power monitor thread cleanly exited.");
     return 0;
 }
 
 void ResetModState() noexcept {
+    g_stopRequested.store(false);
     g_manualOverrideActive = false;
     g_manualOverrideHz = 0;
     g_lastSuccessfulSwitchTick = 0;
     s_lastInhibitCheckTick = 0;
     s_cachedInhibitMatch = std::nullopt;
     InvalidateDisplayDeviceCache();
+    RemoveNativeNotificationIcon();
     g_lastLoggedHz = 0;
     g_lastLoggedReason.clear();
     g_lastLoggedAC = false;
@@ -2058,67 +2103,9 @@ BOOL WhTool_ModInit() {
 
     ResetModState();
 
-    g_hMutex = CreateMutexW(nullptr, FALSE, g_szMutexName);
-    if (!g_hMutex || GetLastError() == ERROR_ALREADY_EXISTS) {
-        if (g_hMutex) {
-            CloseHandle(g_hMutex);
-            g_hMutex = nullptr;
-        }
-        Wh_Log(L"Mod is already active or failed to acquire mutex.");
-        return FALSE;
-    }
-
-    LoadSettings();
-
-    g_initialDisplayModes.clear();
-    for (const auto& dev : GetTargetDisplayDevices(true)) {
-        const WCHAR* pDev = dev.empty() ? nullptr : dev.c_str();
-        DEVMODEW dm = {};
-        dm.dmSize = sizeof(dm);
-        if (EnumDisplaySettingsExW(pDev, ENUM_CURRENT_SETTINGS, &dm, EDS_ROTATEDMODE)) {
-            g_initialDisplayModes.emplace_back(dev, dm);
-        }
-    }
-
-    ScopedHandle hInitEvent(CreateEventW(nullptr, TRUE, FALSE, nullptr));
-    if (!hInitEvent) {
-        if (g_hMutex) {
-            CloseHandle(g_hMutex);
-            g_hMutex = nullptr;
-        }
-        return FALSE;
-    }
-
-    g_hThread = CreateThread(nullptr, 0, PowerMonitorThreadProc, hInitEvent.get(), 0, nullptr);
+    g_hThread = CreateThread(nullptr, 0, PowerMonitorThreadProc, nullptr, 0, nullptr);
     if (!g_hThread) {
-        if (g_hMutex) {
-            CloseHandle(g_hMutex);
-            g_hMutex = nullptr;
-        }
-        return FALSE;
-    }
-
-    DWORD waitRes = WaitForSingleObject(hInitEvent.get(), 5000);
-    HWND hWnd = g_hWnd.load();
-
-    if (waitRes != WAIT_OBJECT_0 || !hWnd) {
-        if (hWnd) {
-            PostMessageW(hWnd, WM_CLOSE, 0, 0);
-        } else if (g_hThread) {
-            PostThreadMessageW(GetThreadId(g_hThread), WM_QUIT, 0, 0);
-        }
-        if (g_hThread) {
-            if (WaitForSingleObject(g_hThread, 5000) != WAIT_OBJECT_0) {
-                TerminateThread(g_hThread, 1);
-            }
-            CloseHandle(g_hThread);
-            g_hThread = nullptr;
-        }
-        if (g_hMutex) {
-            CloseHandle(g_hMutex);
-            g_hMutex = nullptr;
-        }
-        ResetModState();
+        Wh_Log(L"Failed to create power monitor thread (error %lu).", GetLastError());
         return FALSE;
     }
 
@@ -2132,7 +2119,14 @@ void WhTool_ModSettingsChanged() {
 }
 
 void WhTool_ModUninit() {
+    g_stopRequested.store(true);
+
     HWND hWnd = g_hWnd.load();
+    for (DWORD i = 0; !hWnd && i < UNINIT_WINDOW_WAIT_ITERATIONS; ++i) {
+        Sleep(UNINIT_WINDOW_WAIT_STEP_MS);
+        hWnd = g_hWnd.load();
+    }
+
     if (hWnd) {
         PostMessageW(hWnd, WM_CLOSE, 0, 0);
     } else if (g_hThread) {
@@ -2140,14 +2134,12 @@ void WhTool_ModUninit() {
     }
 
     if (g_hThread) {
-        WaitForSingleObject(g_hThread, INFINITE);
+        if (WaitForSingleObject(g_hThread, UNINIT_JOIN_TIMEOUT_MS) != WAIT_OBJECT_0) {
+            Wh_Log(L"Worker thread did not exit in time; terminating.");
+            TerminateThread(g_hThread, 0);
+        }
         CloseHandle(g_hThread);
         g_hThread = nullptr;
-    }
-
-    if (g_hMutex) {
-        CloseHandle(g_hMutex);
-        g_hMutex = nullptr;
     }
 
     ResetModState();
@@ -2171,6 +2163,20 @@ void WhTool_ModUninit() {
 
 bool g_isToolModProcessLauncher;
 HANDLE g_toolModProcessMutex;
+
+static const WCHAR* NormalizeModId(const WCHAR* id) noexcept {
+    if (!id) return L"";
+    if (_wcsnicmp(id, L"local@", 6) == 0) {
+        return id + 6;
+    }
+    return id;
+}
+
+static bool MatchModId(const WCHAR* id1, const WCHAR* id2) noexcept {
+    if (!id1 || !id2) return false;
+    if (_wcsicmp(id1, id2) == 0) return true;
+    return _wcsicmp(NormalizeModId(id1), NormalizeModId(id2)) == 0;
+}
 
 void WINAPI EntryPoint_Hook() {
     Wh_Log(L">");
@@ -2206,7 +2212,7 @@ BOOL Wh_ModInit() {
     for (int i = 1; i < argc - 1; i++) {
         if (wcscmp(argv[i], L"-tool-mod") == 0) {
             isToolModProcess = true;
-            if (wcscmp(argv[i + 1], WH_MOD_ID) == 0) {
+            if (MatchModId(argv[i + 1], WH_MOD_ID)) {
                 isCurrentToolModProcess = true;
             }
             break;
@@ -2220,16 +2226,21 @@ BOOL Wh_ModInit() {
     }
 
     if (isCurrentToolModProcess) {
+        std::wstring mutexName = L"windhawk-tool-mod_" + std::wstring(NormalizeModId(WH_MOD_ID));
         g_toolModProcessMutex =
-            CreateMutex(nullptr, TRUE, L"windhawk-tool-mod_" WH_MOD_ID);
+            CreateMutexW(nullptr, FALSE, mutexName.c_str());
         if (!g_toolModProcessMutex) {
             Wh_Log(L"CreateMutex failed");
             ExitProcess(1);
         }
 
         if (GetLastError() == ERROR_ALREADY_EXISTS) {
-            Wh_Log(L"Tool mod already running (%s)", WH_MOD_ID);
-            ExitProcess(1);
+            DWORD waitRes = WaitForSingleObject(g_toolModProcessMutex, 2000);
+            if (waitRes != WAIT_OBJECT_0 && waitRes != WAIT_ABANDONED) {
+                Wh_Log(L"Tool mod already running (%s)", WH_MOD_ID);
+                ExitProcess(1);
+            }
+            ReleaseMutex(g_toolModProcessMutex);
         }
 
         if (!WhTool_ModInit()) {
