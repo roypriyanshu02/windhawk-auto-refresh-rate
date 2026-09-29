@@ -8,7 +8,7 @@
 
 Auto Refresh Rate is a lightweight Windhawk mod that automates display refresh rates based on power state, fullscreen games, foreground apps, and docking.
 
-It runs in-process inside `explorer.exe`. Unplug your charger, and your panel drops to 60 Hz to stretch battery runtime. Plug in or launch a game, and it immediately boosts back to full speed. Because it hooks native Windows power broadcasts (`RegisterPowerSettingNotification`) without background polling loops, idle CPU usage stays at 0%.
+It runs in a dedicated background process via `windhawk.exe`. Unplug your charger, and your panel drops to 60 Hz to stretch battery runtime. Plug in or launch a game, and it immediately boosts back to full speed. Because it hooks native Windows power broadcasts (`RegisterPowerSettingNotification`) without background polling loops, idle CPU usage stays at 0%.
 
 ## Installation
 
@@ -38,7 +38,7 @@ _Tip: To test immediately without unplugging power, toggle Windows Energy Saver 
 
 ## How it works
 
-Auto Refresh Rate runs in-process inside `explorer.exe` and hooks native Windows event notifications without background polling:
+Auto Refresh Rate runs in a dedicated background process via `windhawk.exe` and hooks native Windows event notifications without background polling:
 
 * **Power subsystems:** Listens to `GUID_ACDC_POWER_SOURCE` and `GUID_POWER_SAVING_STATUS` via `RegisterPowerSettingNotification`.
 * **Window events:** Detects active applications and fullscreen games via `SetWinEventHook` (`EVENT_SYSTEM_FOREGROUND`).
