@@ -7,10 +7,7 @@
 // @github          https://github.com/roypriyanshu02
 // @homepage        https://github.com/roypriyanshu02/windhawk-auto-refresh-rate
 // @include         windhawk.exe
-// @architecture    x86-64
-// @architecture    arm64
-// @architecture    x86
-// @compilerOptions -std=c++20 -lole32 -lgdi32 -luser32 -ladvapi32 -lpowrprof -lshell32
+// @compilerOptions -lole32 -lgdi32 -luser32 -ladvapi32 -lpowrprof -lshell32
 // @license         MIT
 // ==/WindhawkMod==
 
@@ -239,28 +236,6 @@ struct ScopedHandle {
     [[nodiscard]] explicit operator bool() const noexcept { return isValid(); }
 };
 
-struct ScopedGdiObject {
-    HGDIOBJ m_obj = nullptr;
-    explicit ScopedGdiObject(HGDIOBJ o) noexcept : m_obj(o) {}
-    ~ScopedGdiObject() noexcept {
-        if (m_obj) {
-            ::DeleteObject(m_obj);
-        }
-    }
-    ScopedGdiObject(const ScopedGdiObject&) = delete;
-    ScopedGdiObject& operator=(const ScopedGdiObject&) = delete;
-    ScopedGdiObject(ScopedGdiObject&& other) noexcept : m_obj(other.m_obj) { other.m_obj = nullptr; }
-    ScopedGdiObject& operator=(ScopedGdiObject&& other) noexcept {
-        if (this != &other) {
-            if (m_obj) ::DeleteObject(m_obj);
-            m_obj = other.m_obj;
-            other.m_obj = nullptr;
-        }
-        return *this;
-    }
-    [[nodiscard]] HGDIOBJ get() const noexcept { return m_obj; }
-};
-
 struct ScopedRegKey {
     HKEY m_k = nullptr;
     constexpr ScopedRegKey(HKEY k = nullptr) noexcept : m_k(k) {}
@@ -282,19 +257,6 @@ struct ScopedRegKey {
     }
     [[nodiscard]] HKEY get() const noexcept { return m_k; }
     [[nodiscard]] explicit operator bool() const noexcept { return m_k != nullptr; }
-};
-
-struct ScopedDcState {
-    HDC m_hdc = nullptr;
-    int m_state = 0;
-    explicit ScopedDcState(HDC hdc) noexcept : m_hdc(hdc), m_state(hdc ? ::SaveDC(hdc) : 0) {}
-    ~ScopedDcState() noexcept {
-        if (m_hdc && m_state != 0) {
-            ::RestoreDC(m_hdc, m_state);
-        }
-    }
-    ScopedDcState(const ScopedDcState&) = delete;
-    ScopedDcState& operator=(const ScopedDcState&) = delete;
 };
 
 
@@ -347,7 +309,6 @@ static constexpr GUID GUID_OVERLAY_BEST_PERFORMANCE = {
 #endif
 
 // Custom window messages and timer identifiers
-constexpr UINT WM_APP_REAPPLY_POWER_STATE   = WM_APP + 101;
 constexpr UINT WM_APP_FOREGROUND_CHANGED    = WM_APP + 102;
 constexpr UINT WM_APP_SETTINGS_CHANGED      = WM_APP + 103;
 constexpr UINT WM_APP_TRAY_NOTIFY           = WM_APP + 104;
@@ -1982,7 +1943,7 @@ DWORD WINAPI PowerMonitorThreadProc(LPVOID /*lpParam*/) {
     wc.hInstance = hInstance;
     wc.lpszClassName = g_szClassName;
 
-    if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+    if (!RegisterClassExW(&wc)) {
         Wh_Log(L"Failed to register window class '%s' (error %lu).", g_szClassName, GetLastError());
         if (g_hReadyEvent) SetEvent(g_hReadyEvent);
         return 1;
@@ -2073,7 +2034,7 @@ void ResetModState() noexcept {
 // ============================================================================
 
 BOOL WhTool_ModInit() {
-    Wh_Log(L"Initializing mod (Version 1.0.0)...");
+    Wh_Log(L"Initializing mod (Version %s)...", WH_MOD_VERSION);
 
     ResetModState();
 
