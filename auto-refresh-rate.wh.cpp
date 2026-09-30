@@ -336,9 +336,6 @@ constexpr DWORD TRAY_ICON_LIFETIME_MS           = 5000;
 constexpr DWORD INHIBIT_CACHE_TTL_MS            = 4000;
 constexpr DWORD HOTKEY_CYCLE_COOLDOWN_MS        = 500;
 constexpr DWORD MOUSE_DRAG_RETRY_MS             = 250;
-constexpr DWORD UNINIT_JOIN_TIMEOUT_MS          = 5000;
-constexpr DWORD UNINIT_WINDOW_WAIT_ITERATIONS   = 20;
-constexpr DWORD UNINIT_WINDOW_WAIT_STEP_MS      = 10;
 
 // ============================================================================
 // Mod Configuration & State
@@ -1218,7 +1215,7 @@ void LoadSettings() {
 
     DWORD displayAC = (g_settings.targetAC == 0) ? GetMaxRefreshRate() : g_settings.targetAC;
     DWORD displayDC = (g_settings.targetDC == 1) ? GetMinRefreshRate() : ((g_settings.targetDC == 0) ? displayAC : g_settings.targetDC);
-    DWORD resolvedDC = (g_settings.targetDC == 0) ? displayAC : g_settings.targetDC;
+    DWORD resolvedDC = (g_settings.targetDC == 0) ? g_settings.targetAC : g_settings.targetDC;
 
     // 3. Windows Energy Saver
     if (g_settings.energySaverEnabled && state.isBatterySaverActive) {
@@ -1887,10 +1884,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
         }
         break;
 
-    case WM_APP_REAPPLY_POWER_STATE:
-        SynchronizeAndApplyPolicy();
-        return 0;
-
     case WM_CLOSE: {
         KillTimer(hWnd, TIMER_ID_POWER_DEBOUNCE);
         KillTimer(hWnd, TIMER_ID_FOREGROUND_DEBOUNCE);
@@ -2052,8 +2045,11 @@ BOOL WhTool_ModInit() {
         return FALSE;
     }
 
-    if (WaitForSingleObject(g_hReadyEvent, 5000) != WAIT_OBJECT_0) {
-        Wh_Log(L"Worker thread did not signal ready in time");
+    if (WaitForSingleObject(g_hReadyEvent, 5000) != WAIT_OBJECT_0 || !g_hWnd.load()) {
+        Wh_Log(L"Worker thread did not signal ready or create window in time");
+        CloseHandle(g_hReadyEvent);
+        g_hReadyEvent = nullptr;
+        return FALSE;
     }
     CloseHandle(g_hReadyEvent);
     g_hReadyEvent = nullptr;
