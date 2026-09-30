@@ -465,7 +465,6 @@ static DWORD g_manualOverrideHz = 0;
 
 static std::atomic<bool> s_trayIconActive{false};
 
-static std::vector<std::pair<std::wstring, DEVMODEW>> g_initialDisplayModes;
 
 void SynchronizeAndApplyPolicy(bool forceNotification = false, const std::wstring& forcedBrief = L"");
 void ShowNativeNotification(DWORD hz, const std::wstring& reasonBrief);
@@ -1570,9 +1569,10 @@ void ApplyRefreshRateToTargets(DWORD targetHz, const std::wstring& reasonBrief, 
         planned.push_back(PlannedTarget{ dev, planOpt->targetMode, planOpt->needsChange });
     }
 
-    // Phase 2: Apply dynamic mode switch to all prepared targets atomically
+    // Phase 2: Apply dynamic mode switch per display (flags = 0, dynamic without registry persistence)
     bool anyChanged = false;
     bool allSucceeded = true;
+    DWORD lastAppliedHz = 0;
 
     for (const auto& pt : planned) {
         if (!pt.needsChange) continue;
@@ -1581,26 +1581,22 @@ void ApplyRefreshRateToTargets(DWORD targetHz, const std::wstring& reasonBrief, 
 
         DEVMODEW dmTarget = pt.targetMode;
         Wh_Log(L"Adjusting %s: -> %u Hz...", pDevLog, dmTarget.dmDisplayFrequency);
-        if (ChangeDisplaySettingsExW(pDev, &dmTarget, nullptr, CDS_UPDATEREGISTRY | CDS_NORESET, nullptr) == DISP_CHANGE_SUCCESSFUL) {
+        if (ChangeDisplaySettingsExW(pDev, &dmTarget, nullptr, 0, nullptr) == DISP_CHANGE_SUCCESSFUL) {
             anyChanged = true;
-            Wh_Log(L"Success: Display (%s) staged to %u Hz.", pDevLog, dmTarget.dmDisplayFrequency);
+            lastAppliedHz = dmTarget.dmDisplayFrequency;
+            Wh_Log(L"Success: Display (%s) dynamically switched to %u Hz.", pDevLog, dmTarget.dmDisplayFrequency);
         } else {
             allSucceeded = false;
-            Wh_Log(L"Failed to stage tested display settings on %s.", pDevLog);
+            Wh_Log(L"Failed dynamic switch of display settings on %s.", pDevLog);
         }
     }
 
     if (anyChanged && allSucceeded) {
-        if (ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr) == DISP_CHANGE_SUCCESSFUL) {
-            g_lastSuccessfulSwitchTick = GetTickCount64();
-        } else {
-            allSucceeded = false;
-            Wh_Log(L"Failed atomic commit of display settings.");
-        }
+        g_lastSuccessfulSwitchTick = GetTickCount64();
     }
 
     if ((anyChanged && allSucceeded) || forceNotification) {
-        DWORD notifHz = (targetHz <= 1) ? GetCurrentPrimaryRefreshRate() : targetHz;
+        DWORD notifHz = (lastAppliedHz > 0) ? lastAppliedHz : GetCurrentPrimaryRefreshRate();
         ShowNativeNotification(notifHz, reasonBrief);
     }
 }
@@ -1925,18 +1921,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
             return 0;
         } else if (wParam == TIMER_ID_DISPLAY_CHANGE) {
             KillTimer(hWnd, TIMER_ID_DISPLAY_CHANGE);
-            for (const auto& dev : GetTargetDisplayDevices(true)) {
-                auto it = std::find_if(g_initialDisplayModes.begin(), g_initialDisplayModes.end(),
-                    [&](const auto& pair) { return pair.first == dev; });
-                if (it == g_initialDisplayModes.end()) {
-                    const WCHAR* pDev = dev.empty() ? nullptr : dev.c_str();
-                    DEVMODEW dm = {};
-                    dm.dmSize = sizeof(dm);
-                    if (EnumDisplaySettingsExW(pDev, ENUM_CURRENT_SETTINGS, &dm, EDS_ROTATEDMODE)) {
-                        g_initialDisplayModes.emplace_back(dev, dm);
-                    }
-                }
-            }
             SynchronizeAndApplyPolicy();
             return 0;
         } else if (wParam == TIMER_ID_TIME_CHECK) {
@@ -1982,26 +1966,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
         RemoveNativeNotificationIcon();
 
-        // Restore original display frequencies if modified
-        bool anyRestored = false;
-        for (const auto& [devName, dmInit] : g_initialDisplayModes) {
-            const WCHAR* pDev = devName.empty() ? nullptr : devName.c_str();
-            DEVMODEW dmCur = {};
-            dmCur.dmSize = sizeof(dmCur);
-            if (EnumDisplaySettingsExW(pDev, ENUM_CURRENT_SETTINGS, &dmCur, EDS_ROTATEDMODE)) {
-                if (dmCur.dmDisplayFrequency != dmInit.dmDisplayFrequency) {
-                    DEVMODEW dmRestore = dmInit;
-                    dmRestore.dmFields |= DM_DISPLAYFREQUENCY;
-                    if (ChangeDisplaySettingsExW(pDev, &dmRestore, nullptr, CDS_UPDATEREGISTRY | CDS_NORESET, nullptr) == DISP_CHANGE_SUCCESSFUL) {
-                        anyRestored = true;
-                    }
-                }
-            }
-        }
-        if (anyRestored) {
-            ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
-        }
-        g_initialDisplayModes.clear();
+        // Dynamically reset all displays back to the user's saved registry profile
+        ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
 
         DestroyWindow(hWnd);
         return 0;
@@ -2053,16 +2019,6 @@ DWORD WINAPI PowerMonitorThreadProc(LPVOID /*lpParam*/) {
     g_hWnd.store(hWnd);
     Wh_Log(L"Power monitor window created (HWND 0x%p).", hWnd);
 
-    g_initialDisplayModes.clear();
-    for (const auto& dev : GetTargetDisplayDevices(true)) {
-        if (g_stopRequested.load()) return 0;
-        const WCHAR* pDev = dev.empty() ? nullptr : dev.c_str();
-        DEVMODEW dm = {};
-        dm.dmSize = sizeof(dm);
-        if (EnumDisplaySettingsExW(pDev, ENUM_CURRENT_SETTINGS, &dm, EDS_ROTATEDMODE)) {
-            g_initialDisplayModes.emplace_back(dev, dm);
-        }
-    }
 
     RegisterAllPowerNotifications(hWnd);
 
@@ -2122,7 +2078,6 @@ void ResetModState() noexcept {
     g_lastLoggedAC = false;
     g_lastLoggedBatt = 255;
     g_lastLoggedSaver = false;
-    g_initialDisplayModes.clear();
 }
 
 // ============================================================================
