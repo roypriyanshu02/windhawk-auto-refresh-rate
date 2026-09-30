@@ -33,7 +33,7 @@ _Quick test: Toggle Windows Energy Saver in Quick Settings (`Win + A`), or enabl
 When multiple rules trigger at once, display frequency resolves in strict order:
 
 1. **Manual Hotkey Lock** — `Win + Ctrl + R` override active
-2. **Protected Apps** — Inhibit tools running (`obs64`, `discord`)
+2. **Protected Apps** — Inhibit tools running (`obs64`)
 3. **Windows Energy Saver** — Drops to configured battery-saver rate
 4. **Foreground App / Game** — App rules (`blender`, `resolve`) or fullscreen 3D boost
 5. **Night Schedule** — Evening low-Hz comfort window
@@ -44,7 +44,7 @@ When multiple rules trigger at once, display frequency resolves in strict order:
 * **Power Baseline:** Panel max on AC, 60 Hz (or minimum supported) on battery.
 * **Game Boost:** Boosts to highest supported refresh rate in borderless and exclusive fullscreen 3D games.
 * **App Rules:** Dedicated refresh rates for creative tools (`blender`, `resolve`, `affinity`) and media playback (`screenbox`, `netflix`).
-* **Capture Protection:** Freezes rate switching while capture or streaming tools run (`obs64`, `discord`) to prevent capture drops or display flashes.
+* **Capture Protection:** Freezes rate switching while capture or streaming tools run (`obs64`) to prevent capture drops or display flashes.
 * **Smart Docking:** Lowers only built-in laptop panels on battery; keeps external desktop monitors at full refresh rate.
 * **Quiet Switching:** Waits for keyboard and mouse activity to pause before lowering refresh rate.
 * **Night Schedule:** Optional time window to lock lower refresh rates during evening hours.
@@ -54,7 +54,7 @@ When multiple rules trigger at once, display frequency resolves in strict order:
 ## Troubleshooting
 
 * **Panel Flashing:** Increase **Anti-flicker cooldown** (default: 3 seconds) under **Display & transitions**.
-* **External Displays on Battery:** Smart docking leaves external monitors at full rate by default. Set **Target displays** to `all` to switch all connected screens.
+* **External Displays on Battery:** Smart docking leaves external monitors at full rate by default. Set **Target displays** to `all` and disable **Smart laptop docking** to switch all connected screens.
 * **Diagnostics:** Check Windhawk's **Log** tab for real-time AC/DC transitions, active process detection, and display modes.
 
 ## Changelog
