@@ -447,6 +447,7 @@ static ULONGLONG g_lastSuccessfulSwitchTick = 0;
 static HANDLE g_hThread = nullptr;
 static std::atomic<HWND> g_hWnd{nullptr};
 static std::atomic<bool> g_stopRequested{false};
+static HANDLE g_hReadyEvent = nullptr;
 static HWINEVENTHOOK g_hWinEventHook = nullptr;
 extern HANDLE g_toolModProcessMutex;
 
@@ -2002,6 +2003,7 @@ DWORD WINAPI PowerMonitorThreadProc(LPVOID /*lpParam*/) {
 
     if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
         Wh_Log(L"Failed to register window class '%s' (error %lu).", g_szClassName, GetLastError());
+        if (g_hReadyEvent) SetEvent(g_hReadyEvent);
         return 1;
     }
 
@@ -2013,11 +2015,16 @@ DWORD WINAPI PowerMonitorThreadProc(LPVOID /*lpParam*/) {
     if (!hWnd) {
         Wh_Log(L"Failed to create window (error %lu).", GetLastError());
         UnregisterClassW(g_szClassName, hInstance);
+        if (g_hReadyEvent) SetEvent(g_hReadyEvent);
         return 1;
     }
 
     g_hWnd.store(hWnd);
     Wh_Log(L"Power monitor window created (HWND 0x%p).", hWnd);
+
+    if (g_hReadyEvent) {
+        SetEvent(g_hReadyEvent);
+    }
 
 
     RegisterAllPowerNotifications(hWnd);
@@ -2089,11 +2096,25 @@ BOOL WhTool_ModInit() {
 
     ResetModState();
 
+    g_hReadyEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!g_hReadyEvent) {
+        Wh_Log(L"CreateEvent failed");
+        return FALSE;
+    }
+
     g_hThread = CreateThread(nullptr, 0, PowerMonitorThreadProc, nullptr, 0, nullptr);
     if (!g_hThread) {
         Wh_Log(L"Failed to create power monitor thread (error %lu).", GetLastError());
+        CloseHandle(g_hReadyEvent);
+        g_hReadyEvent = nullptr;
         return FALSE;
     }
+
+    if (WaitForSingleObject(g_hReadyEvent, 5000) != WAIT_OBJECT_0) {
+        Wh_Log(L"Worker thread did not signal ready in time");
+    }
+    CloseHandle(g_hReadyEvent);
+    g_hReadyEvent = nullptr;
 
     Wh_Log(L"Mod initialized.");
     return TRUE;
@@ -2108,11 +2129,6 @@ void WhTool_ModUninit() {
     g_stopRequested.store(true);
 
     HWND hWnd = g_hWnd.load();
-    for (DWORD i = 0; !hWnd && i < UNINIT_WINDOW_WAIT_ITERATIONS; ++i) {
-        Sleep(UNINIT_WINDOW_WAIT_STEP_MS);
-        hWnd = g_hWnd.load();
-    }
-
     if (hWnd) {
         PostMessageW(hWnd, WM_CLOSE, 0, 0);
     } else if (g_hThread) {
@@ -2120,15 +2136,13 @@ void WhTool_ModUninit() {
     }
 
     if (g_hThread) {
-        if (WaitForSingleObject(g_hThread, UNINIT_JOIN_TIMEOUT_MS) != WAIT_OBJECT_0) {
-            Wh_Log(L"Worker thread did not exit in time; terminating.");
-            TerminateThread(g_hThread, 0);
+        if (WaitForSingleObject(g_hThread, 5000) != WAIT_OBJECT_0) {
+            Wh_Log(L"Worker thread did not exit in time");
+            ExitProcess(1);
         }
         CloseHandle(g_hThread);
         g_hThread = nullptr;
     }
-
-    ResetModState();
 
     Wh_Log(L"Mod uninitialized.");
 }
