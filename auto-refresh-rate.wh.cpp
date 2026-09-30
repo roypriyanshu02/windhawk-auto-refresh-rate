@@ -37,8 +37,8 @@ _Tip: To test immediately without unplugging power, toggle Windows Energy Saver 
 
 * **Power source switching:** Run at maximum refresh rate on AC power, drop to 60 Hz (or lowest supported rate) on battery, and lower further when Windows Energy Saver turns on.
 * **Fullscreen game boost:** Detects borderless and exclusive fullscreen games to automatically switch into maximum refresh rate.
-* **Per-application rules:** Set custom refresh rates for creative applications and lock media players to battery refresh rates. Semicolon-separated executable names (`cs2; blender; vlc`); `.exe` extensions are optional.
-* **Protected applications:** Locks refresh rate switching while capture or presentation tools run (e.g. OBS Studio, PowerPoint) to avoid display stutter.
+* **Per-application rules:** Set custom refresh rates for creative applications and lock media players to battery refresh rates (e.g. `blender`, `resolve`, `affinity`, `screenbox`). The `.exe` extension is optional.
+* **Protected applications:** Locks refresh rate switching while capture or streaming tools run (e.g. `obs64`, `discord`) to avoid display stutter.
 * **Smart laptop docking:** When running on battery with external monitors connected, lowers only the built-in laptop screen while keeping desktop monitors at full refresh rate.
 * **Quiet transitions:** Waits for keyboard and mouse activity to rest before lowering refresh rates, with an anti-flicker cooldown between switches.
 * **Night schedule:** Enforces battery refresh rates during designated night hours to reduce eye strain.
@@ -50,7 +50,7 @@ _Tip: To test immediately without unplugging power, toggle Windows Energy Saver 
 When multiple conditions match simultaneously, target refresh rates resolve in the following order:
 
 1. **Manual hotkey lock:** Overrides all automated rules until unlocked or cycled back to auto.
-2. **Protected applications:** Pauses switching while capture or presentation tools run (e.g. OBS Studio, PowerPoint).
+2. **Protected applications:** Pauses switching while capture or streaming tools run (e.g. `obs64`, `discord`).
 3. **Windows Energy Saver:** Drops to power-saving rate immediately when battery saver triggers.
 4. **Foreground application rules & game boost:** Applies matched high/low app rules or fullscreen game boost.
 5. **Night schedule:** Applies battery refresh rate during scheduled evening hours.
@@ -69,7 +69,7 @@ When multiple conditions match simultaneously, target refresh rates resolve in t
 * Automatic display refresh rate switching on AC and battery power transitions.
 * Windows Energy Saver integration with instant frequency step-down.
 * Borderless and fullscreen game detection with automatic high-refresh boost.
-* Per-application refresh rate rules and screen capture protection (`obs64`, `powerpnt`).
+* Per-application refresh rate rules and screen capture protection (`obs64`, `discord`).
 * Smart laptop docking: maintains external monitor speeds while lowering internal panel.
 * On-screen display notification badge with DPI awareness and click-through transparency.
 * Global cycle hotkey (`Win + Ctrl + R`) to step through supported frequencies.
@@ -91,9 +91,9 @@ For bug reports, feature requests, and source code, visit the **[GitHub reposito
       $name: "Plugged-in rate"
       $description: "Refresh rate when connected to AC power."
       $options:
-        - max: "Highest supported (recommended)"
+        - max: "Highest supported (Panel Max)"
         - "60": "60 Hz"
-        - custom: "Custom rate"
+        - custom: "Custom (enter Hz below)"
     - CustomPluggedInRate: 144
       $name: "Custom plugged-in rate"
       $description: "Target refresh rate in Hz."
@@ -102,9 +102,9 @@ For bug reports, feature requests, and source code, visit the **[GitHub reposito
       $description: "Refresh rate while running on battery."
       $options:
         - "60": "60 Hz (recommended)"
-        - min: "Lowest supported"
-        - match_ac: "Match plugged-in rate"
-        - custom: "Custom rate"
+        - min: "Lowest supported (Power Saving)"
+        - match_ac: "Same as plugged-in rate"
+        - custom: "Custom (enter Hz below)"
     - CustomBatteryRate: 60
       $name: "Custom on-battery rate"
       $description: "Target refresh rate in Hz."
@@ -116,8 +116,8 @@ For bug reports, feature requests, and source code, visit the **[GitHub reposito
       $description: "Refresh rate while Energy Saver is active."
       $options:
         - "60": "60 Hz (recommended)"
-        - min: "Lowest supported"
-        - custom: "Custom rate"
+        - min: "Lowest supported (Power Saving)"
+        - custom: "Custom (enter Hz below)"
     - CustomEnergySaverRate: 60
       $name: "Custom Energy Saver rate"
       $description: "Target refresh rate in Hz."
@@ -131,18 +131,25 @@ For bug reports, feature requests, and source code, visit the **[GitHub reposito
     - AppRulesEnabled: false
       $name: "Per-app refresh rates"
       $description: "Apply custom refresh rates when designated apps are focused."
-    - HighRefreshApps: "cs2; valorant; overwatch; cyberpunk2077; blender"
+    - HighRefreshApps:
+        - "blender"
+        - "resolve"
+        - "affinity"
       $name: "High-refresh apps"
-      $description: "Apps that boost to maximum refresh rate when focused. Separate names with semicolons (e.g. cs2; blender)."
-    - LowRefreshApps: "vlc; mpc-hc64; netflix; acrobat"
+      $description: "Apps that boost to maximum refresh rate when focused. Click '+' to add apps; '.exe' is optional."
+    - LowRefreshApps:
+        - "screenbox"
+        - "netflix"
       $name: "Low-refresh apps"
-      $description: "Apps locked to battery refresh rate when focused. These apps also suppress fullscreen game boost when in fullscreen mode. Separate names with semicolons (e.g. vlc; acrobat)."
+      $description: "Apps locked to battery refresh rate when focused. These apps also suppress fullscreen game boost when in fullscreen mode. Click '+' to add apps; '.exe' is optional."
     - InhibitAppsEnabled: true
       $name: "Protected apps lock"
       $description: "Pause display switching while capture or presentation tools run."
-    - InhibitApps: "obs64; obs; streamlabs; powerpnt"
+    - InhibitApps:
+        - "obs64"
+        - "discord"
       $name: "Protected apps"
-      $description: "Apps that block refresh rate changes while running. Separate names with semicolons (e.g. obs64; powerpnt)."
+      $description: "Apps that block refresh rate changes while running. Click '+' to add apps; '.exe' is optional."
   $name: "Gaming & applications"
   $description: "Fullscreen game boost, per-app rules, and screen capture protection."
 
@@ -168,13 +175,13 @@ For bug reports, feature requests, and source code, visit the **[GitHub reposito
         - all: "All connected displays"
     - SmartDockingEnabled: true
       $name: "Smart laptop docking"
-      $description: "Keep external monitors at high refresh rate while lowering only the internal laptop screen on battery."
+      $description: "Keep external monitors at high refresh rate while lowering only the internal laptop screen on battery. Only applies to the AC/battery baseline; does not override Energy Saver, Night Schedule, or per-app rules."
     - QuietSwitchEnabled: true
       $name: "Idle-only switching"
       $description: "Wait for keyboard and mouse input to pause before lowering refresh rate."
     - AntiFlickerCooldown: 3
       $name: "Anti-flicker cooldown"
-      $description: "Minimum seconds to wait between display switches to avoid rapid panel flashing."
+      $description: "Minimum seconds to wait between display switches to avoid rapid panel flashing (0 to 10 seconds recommended)."
   $name: "Display & transitions"
   $description: "Target display selection, laptop docking, and transition timing."
 
@@ -387,7 +394,6 @@ constexpr UINT_PTR TIMER_ID_COOLDOWN_SWITCH     = 8;
 constexpr UINT_PTR TIMER_ID_INHIBIT_RECHECK     = 9;
 constexpr UINT_PTR TIMER_ID_TRAY_CLEANUP        = 10;
 
-
 constexpr int HOTKEY_ID_CYCLE                   = 0x415A;
 
 constexpr DWORD DEBOUNCE_DELAY_MS               = 350;
@@ -395,15 +401,15 @@ constexpr DWORD RESUME_DELAY_MS                 = 1000;
 constexpr DWORD DISPLAY_CHANGE_DELAY_MS         = 500;
 constexpr DWORD FOREGROUND_DEBOUNCE_MS          = 100;
 constexpr DWORD QUIET_SWITCH_TIMEOUT_MS         = 2000;
+constexpr DWORD TIME_CHECK_INTERVAL_MS          = 30000;
+constexpr DWORD INHIBIT_RECHECK_INTERVAL_MS     = 5000;
+constexpr DWORD TRAY_ICON_LIFETIME_MS           = 5000;
 constexpr DWORD INHIBIT_CACHE_TTL_MS            = 4000;
 constexpr DWORD HOTKEY_CYCLE_COOLDOWN_MS        = 500;
 constexpr DWORD MOUSE_DRAG_RETRY_MS             = 250;
 constexpr DWORD UNINIT_JOIN_TIMEOUT_MS          = 5000;
 constexpr DWORD UNINIT_WINDOW_WAIT_ITERATIONS   = 20;
 constexpr DWORD UNINIT_WINDOW_WAIT_STEP_MS      = 10;
-constexpr DWORD TIME_CHECK_INTERVAL_MS          = 30000;
-constexpr DWORD INHIBIT_RECHECK_INTERVAL_MS     = 5000;
-constexpr DWORD TRAY_ICON_LIFETIME_MS           = 5000;
 
 // ============================================================================
 // Mod Configuration & State
@@ -420,13 +426,10 @@ struct ModSettings {
 
     bool autoGameBoost = true;
     bool appRulesEnabled = false;
-    std::wstring highRefreshApps = L"cs2; valorant; overwatch; cyberpunk2077; blender";
-    std::wstring lowRefreshApps = L"vlc; mpc-hc64; netflix; acrobat";
     bool smartDockingEnabled = true;
 
     bool quietSwitchEnabled = true;
     bool inhibitAppsEnabled = true;
-    std::wstring inhibitApps = L"obs64; obs; streamlabs; powerpnt";
     DWORD switchCooldownMs = 3000;
 
     bool notificationEnabled = true;
@@ -475,8 +478,6 @@ static bool g_manualOverrideActive = false;
 static DWORD g_manualOverrideHz = 0;
 
 static std::atomic<bool> s_trayIconActive{false};
-
-
 
 static std::vector<std::pair<std::wstring, DEVMODEW>> g_initialDisplayModes;
 
@@ -575,6 +576,37 @@ void LoadSettings();
     return result;
 }
 
+[[nodiscard]] std::vector<std::wstring> ReadAppListSetting(PCWSTR settingPrefix) {
+    std::vector<std::wstring> result;
+    for (int i = 0; i < 256; ++i) {
+        WCHAR key[128];
+        swprintf_s(key, L"%s[%d]", settingPrefix, i);
+        PCWSTR val = Wh_GetStringSetting(key);
+        if (!val) break;
+        if (!*val) {
+            Wh_FreeStringSetting(val);
+            break;
+        }
+        for (auto& app : ParseAppList(val)) {
+            if (std::find(result.begin(), result.end(), app) == result.end()) {
+                result.push_back(std::move(app));
+            }
+        }
+        Wh_FreeStringSetting(val);
+    }
+
+    if (result.empty()) {
+        PCWSTR flat = Wh_GetStringSetting(settingPrefix);
+        if (flat) {
+            if (*flat) {
+                result = ParseAppList(flat);
+            }
+            Wh_FreeStringSetting(flat);
+        }
+    }
+    return result;
+}
+
 [[nodiscard]] bool IsAppInList(std::wstring_view appName, std::span<const std::wstring> list) noexcept {
     auto slash = appName.find_last_of(L"\\/");
     if (slash != std::wstring_view::npos) {
@@ -582,11 +614,27 @@ void LoadSettings();
     }
     if (appName.empty()) return false;
 
+    std::wstring_view appStem = appName;
+    if (appStem.length() > 4 && EqualsIgnoreCase(appStem.substr(appStem.length() - 4), L".exe")) {
+        appStem = appStem.substr(0, appStem.length() - 4);
+    }
+
     for (const auto& item : list) {
         std::wstring_view itemV = item;
         if (EqualsIgnoreCase(appName, itemV)) return true;
-        if (itemV.length() > 4 && EqualsIgnoreCase(itemV.substr(itemV.length() - 4), L".exe")) {
-            if (EqualsIgnoreCase(appName, itemV.substr(0, itemV.length() - 4))) return true;
+        std::wstring_view stem = itemV;
+        if (stem.length() > 4 && EqualsIgnoreCase(stem.substr(stem.length() - 4), L".exe")) {
+            stem = stem.substr(0, stem.length() - 4);
+        }
+        if (EqualsIgnoreCase(appStem, stem)) return true;
+
+        // Friendly creative software aliases
+        if (EqualsIgnoreCase(stem, L"davinci") || EqualsIgnoreCase(stem, L"da vinci") || EqualsIgnoreCase(stem, L"resolve")) {
+            if (EqualsIgnoreCase(appStem, L"resolve")) return true;
+        }
+        if (EqualsIgnoreCase(stem, L"affinity")) {
+            if (EqualsIgnoreCase(appStem, L"photo") || EqualsIgnoreCase(appStem, L"designer") || EqualsIgnoreCase(appStem, L"publisher") ||
+                (appStem.length() >= 8 && _wcsnicmp(appStem.data(), L"affinity", 8) == 0)) return true;
         }
     }
     return false;
@@ -1153,14 +1201,10 @@ void LoadSettings() {
     // 2. Gaming & Applications
     g_settings.autoGameBoost = ReadBoolSettingSafe(L"GamingAndApps.AutoGameBoost", true);
     g_settings.appRulesEnabled = ReadBoolSettingSafe(L"GamingAndApps.AppRulesEnabled", false);
-    g_settings.highRefreshApps = ReadStringSettingSafe(L"GamingAndApps.HighRefreshApps", L"cs2; valorant; overwatch; cyberpunk2077; blender");
-    g_settings.lowRefreshApps = ReadStringSettingSafe(L"GamingAndApps.LowRefreshApps", L"vlc; mpc-hc64; netflix; acrobat");
+    g_parsedHighRefreshApps = ReadAppListSetting(L"GamingAndApps.HighRefreshApps");
+    g_parsedLowRefreshApps = ReadAppListSetting(L"GamingAndApps.LowRefreshApps");
     g_settings.inhibitAppsEnabled = ReadBoolSettingSafe(L"GamingAndApps.InhibitAppsEnabled", true);
-    g_settings.inhibitApps = ReadStringSettingSafe(L"GamingAndApps.InhibitApps", L"obs64; obs; streamlabs; powerpnt");
-
-    g_parsedHighRefreshApps = ParseAppList(g_settings.highRefreshApps);
-    g_parsedLowRefreshApps = ParseAppList(g_settings.lowRefreshApps);
-    g_parsedInhibitApps = ParseAppList(g_settings.inhibitApps);
+    g_parsedInhibitApps = ReadAppListSetting(L"GamingAndApps.InhibitApps");
     s_lastInhibitCheckTick = 0;
     s_cachedInhibitMatch = std::nullopt;
 
@@ -1426,6 +1470,7 @@ void ShowNativeNotification(DWORD hz, const std::wstring& reasonBrief) {
         SetTimer(hWnd, TIMER_ID_TRAY_CLEANUP, TRAY_ICON_LIFETIME_MS, nullptr);
     }
 }
+
 // ============================================================================
 // Display Enumeration & Mode Switching
 // ============================================================================
@@ -1857,7 +1902,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
     case WM_APP_TRAY_NOTIFY: {
         UINT uMsg = LOWORD(lParam);
-        if (uMsg == NIN_BALLOONUSERCLICK || uMsg == NIN_BALLOONTIMEOUT ) {
+        if (uMsg == NIN_BALLOONUSERCLICK || uMsg == NIN_BALLOONTIMEOUT) {
             KillTimer(hWnd, TIMER_ID_TRAY_CLEANUP);
             RemoveNativeNotificationIcon();
         }

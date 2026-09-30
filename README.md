@@ -28,8 +28,8 @@ _Tip: To test immediately without unplugging power, toggle Windows Energy Saver 
 
 * **Power source switching:** Run at maximum refresh rate on AC power, drop to 60 Hz (or lowest supported rate) on battery, and lower further when Windows Energy Saver turns on.
 * **Fullscreen game boost:** Detects borderless and exclusive fullscreen games to automatically switch into maximum refresh rate.
-* **Per-application rules:** Set custom refresh rates for creative applications and lock media players to battery refresh rates. Semicolon-separated executable names (`cs2; blender; vlc`); `.exe` extensions are optional.
-* **Protected applications:** Locks refresh rate switching while capture or presentation tools run (e.g. OBS Studio, PowerPoint) to avoid display stutter.
+* **Per-application rules:** Set custom refresh rates for creative applications and lock media players to battery refresh rates (e.g. `blender`, `resolve`, `affinity`, `screenbox`). The `.exe` extension is optional.
+* **Protected applications:** Locks refresh rate switching while capture or streaming tools run (e.g. `obs64`, `discord`) to avoid display stutter.
 * **Smart laptop docking:** When running on battery with external monitors connected, lowers only the built-in laptop screen while keeping desktop monitors at full refresh rate.
 * **Quiet transitions:** Waits for keyboard and mouse activity to rest before lowering refresh rates, with an anti-flicker cooldown between switches.
 * **Night schedule:** Enforces battery refresh rates during designated night hours to reduce eye strain.
@@ -50,7 +50,7 @@ Auto Refresh Rate runs in a dedicated background process via `windhawk.exe` and 
 When multiple rules match simultaneously, target refresh rates resolve in order:
 
 1. **Manual hotkey lock:** Overrides automated rules until unlocked or cycled back to auto.
-2. **Protected applications:** Pauses switching while capture or presentation tools run (e.g. OBS Studio, PowerPoint).
+2. **Protected applications:** Pauses switching while capture or streaming tools run (e.g. `obs64`, `discord`).
 3. **Windows Energy Saver:** Drops to power-saving rate immediately when battery saver triggers.
 4. **Foreground apps & game boost:** Applies matched high/low app rules or fullscreen game boost.
 5. **Night schedule:** Applies battery refresh rate during scheduled evening hours.
@@ -61,7 +61,7 @@ When multiple rules match simultaneously, target refresh rates resolve in order:
 All options can be configured interactively from the Windhawk **Settings** tab:
 
 * **Power & battery:** Set target rates on AC, battery (`max`, `60`, `min`, `custom`), and Windows Energy Saver.
-* **Gaming & applications:** Automatic boost for borderless/fullscreen games, per-app refresh rules (`cs2; blender; vlc`), and capture inhibition (`obs64; powerpnt`).
+* **Gaming & applications:** Automatic boost for borderless/fullscreen games, per-app refresh rules (`blender`, `resolve`, `affinity`, `screenbox`), and capture inhibition (`obs64`, `discord`).
 * **Display & docking:** Target primary or all displays, enable smart docking (keep external monitors at full rate on battery), and set anti-flicker switch cooldowns.
 * **Shortcuts & schedule:** Global cycle hotkey (`Win + Ctrl + R`), on-screen display badge toggle, and scheduled night hours.
 
@@ -82,10 +82,10 @@ All options can be configured interactively from the Windhawk **Settings** tab:
 | **Gaming & applications** | | |
 | `GamingAndApps.AutoGameBoost` | `true` | Boost to highest supported refresh rate in borderless and fullscreen games. |
 | `GamingAndApps.AppRulesEnabled` | `false` | Apply custom refresh rates when designated apps are focused. |
-| `GamingAndApps.HighRefreshApps` | `cs2; valorant; overwatch; cyberpunk2077; blender` | Apps that boost to maximum refresh rate when focused. |
-| `GamingAndApps.LowRefreshApps` | `vlc; mpc-hc64; netflix; acrobat` | Apps locked to battery refresh rate when focused. |
+| `GamingAndApps.HighRefreshApps` | `[blender, resolve, affinity]` | Apps that boost to maximum refresh rate when focused. |
+| `GamingAndApps.LowRefreshApps` | `[screenbox, netflix]` | Apps locked to battery refresh rate when focused. |
 | `GamingAndApps.InhibitAppsEnabled` | `true` | Pause display switching while capture or presentation tools run. |
-| `GamingAndApps.InhibitApps` | `obs64; obs; streamlabs; powerpnt` | Apps that block refresh rate changes while running. |
+| `GamingAndApps.InhibitApps` | `[obs64, discord]` | Apps that block refresh rate changes while running. |
 | **Night schedule** | | |
 | `Schedule.TimeScheduleEnabled` | `false` | Lower refresh rate during scheduled hours to reduce eye strain. |
 | `Schedule.ScheduleStart` | `22:00` | Schedule start time in 24h or 12h format (e.g. `22:00` or `10:00 PM`). |
@@ -99,7 +99,6 @@ All options can be configured interactively from the Windhawk **Settings** tab:
 | `ShortcutsAndNotifications.OsdBadgeEnabled` | `true` | Show a temporary on-screen badge when the refresh rate changes. |
 | `ShortcutsAndNotifications.GlobalHotkeyEnabled` | `false` | Cycle through supported refresh rates or return to auto mode via hotkey. |
 | `ShortcutsAndNotifications.GlobalHotkey` | `Win+Ctrl+R` | Key combination to cycle rates (e.g. `Win+Ctrl+R`, `Ctrl+Alt+R`). |
-| `ShortcutsAndNotifications.VerboseLogging` | `true` | Log power transitions and refresh rate events to the Windhawk log. |
 
 </details>
 

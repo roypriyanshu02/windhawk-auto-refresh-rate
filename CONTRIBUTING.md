@@ -73,7 +73,7 @@ Before opening a pull request, verify each scenario on your hardware:
 - [ ] **AC/DC transitions:** Unplug the charger to verify the display drops to battery frequency, then reconnect power to confirm it boosts back to maximum rate.
 - [ ] **Energy Saver:** Toggle Windows Energy Saver (`Win + A`) and confirm the panel steps down immediately.
 - [ ] **Game boost:** Launch a borderless or exclusive fullscreen game to confirm the panel locks to maximum refresh rate.
-- [ ] **Protected apps:** Launch a configured tool (`obs64.exe` or `powerpnt.exe`) and confirm display switching is paused.
+- [ ] **Protected apps:** Launch a configured tool (`obs64.exe` or `discord.exe`) and confirm display switching is paused.
 - [ ] **Cycle hotkey:** Enable the hotkey under Settings, then press `Win + Ctrl + R` to cycle sequentially through supported display rates and wrap back to auto mode.
 - [ ] **Version bump:** Incremented `@version` in `// ==WindhawkMod==` and updated the in-file changelog.
 
