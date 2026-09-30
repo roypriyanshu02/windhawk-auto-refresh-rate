@@ -1,127 +1,124 @@
-# Auto Refresh Rate
+<h1 align="center">Auto Refresh Rate</h1>
+<p align="center">
+  <em>Display refresh rate automation for Windows 10 and 11.</em>
+</p>
+<p align="center">
+  <a href="https://windhawk.net/mods/auto-refresh-rate"><img src="https://img.shields.io/badge/windhawk-mod-black?style=flat-square" alt="Windhawk Mod"></a>
+  <a href="https://github.com/roypriyanshu02/windhawk-auto-refresh-rate/releases"><img src="https://img.shields.io/badge/version-1.0.0-33ab12?style=flat-square" alt="Version 1.0.0"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-0284c7?style=flat-square" alt="License"></a>
+  <img src="https://img.shields.io/badge/arch-x86--64%20%7C%20arm64%20%7C%20x86-555?style=flat-square" alt="Architectures">
+</p>
+<p align="center">
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#evaluation-priority">Priority</a> ·
+  <a href="#installation">Install</a> ·
+  <a href="#configuration">Settings</a> ·
+  <a href="#compatibility">Compatibility</a> ·
+  <a href="#troubleshooting">Troubleshooting</a>
+</p>
 
-*Display refresh rate automation for Windows 10 and 11.*
+---
 
-[![Windhawk Mod](https://img.shields.io/badge/windhawk-mod-black?style=flat-square)](https://windhawk.net/mods/auto-refresh-rate)
-[![Version: 1.0.0](https://img.shields.io/badge/version-1.0.0-33ab12?style=flat-square)](https://github.com/roypriyanshu02/windhawk-auto-refresh-rate/releases)
-![Supported Architectures](https://img.shields.io/badge/arch-x86--64%20%7C%20arm64%20%7C%20x86-555?style=flat-square)
+Auto Refresh Rate automates Windows display refresh rates based on AC/battery power, fullscreen games, focused apps, and laptop docking.
 
-Auto Refresh Rate is a lightweight Windhawk mod that automates display refresh rates based on power state, fullscreen games, foreground apps, and docking.
-
-It runs in a dedicated background process via `windhawk.exe`. Unplug your charger, and your panel drops to 60 Hz to stretch battery runtime. Plug in or launch a game, and it immediately boosts back to full speed. Because it hooks native Windows power broadcasts (`RegisterPowerSettingNotification`) without background polling loops, idle CPU usage stays at 0%.
-
-## Installation
-
-### From the Windhawk Mod Manager
-1. Install directly from the [Windhawk Mod Catalog](https://windhawk.net/mods/auto-refresh-rate) or search for **Auto Refresh Rate** in the Windhawk client.
-2. Click **Details** → **Install**.
-
-### Manual / Local Mod
-1. Install [Windhawk](https://windhawk.net/) if not already installed.
-2. In Windhawk, navigate to **Advanced** → **Create Local Mod**.
-3. Copy and paste the source from [`auto-refresh-rate.wh.cpp`](auto-refresh-rate.wh.cpp).
-4. Click **Compile and run**.
-
-_Tip: To test immediately without unplugging power, toggle Windows Energy Saver in Quick Settings (Win + A), or enable the cycle hotkey (Win + Ctrl + R) under Settings._
-
-## Key features
-
-* **Power source switching:** Run at maximum refresh rate on AC power, drop to 60 Hz (or lowest supported rate) on battery, and lower further when Windows Energy Saver turns on.
-* **Fullscreen game boost:** Detects borderless and exclusive fullscreen games to automatically switch into maximum refresh rate.
-* **Per-application rules:** Set custom refresh rates for creative applications and lock media players to battery refresh rates (e.g. `blender`, `resolve`, `affinity`, `screenbox`). The `.exe` extension is optional.
-* **Protected applications:** Locks refresh rate switching while capture or streaming tools run (e.g. `obs64`, `discord`) to avoid display stutter.
-* **Smart laptop docking:** When running on battery with external monitors connected, lowers only the built-in laptop screen while keeping desktop monitors at full refresh rate.
-* **Quiet transitions:** Waits for keyboard and mouse activity to rest before lowering refresh rates, with an anti-flicker cooldown between switches.
-* **Night schedule:** Enforces battery refresh rates during designated night hours to reduce eye strain.
-* **Native Notifications:** Windows notification banner confirms rate changes and logs them to the Notification Center.
-* **Global cycle hotkey:** Step sequentially through each supported display frequency before wrapping back to auto mode (`Win + Ctrl + R`; disabled by default, enable under Settings).
+Unplug your charger, and your panel steps down to 60 Hz to stretch battery runtime. Launch a game or plug back in, and it immediately restores full panel speed. Because it hooks native Windows power and window events without polling loops, idle CPU usage stays at 0.0%.
 
 ## How it works
 
-Auto Refresh Rate runs in a dedicated background process via `windhawk.exe` and hooks native Windows event notifications without background polling. Running as a dedicated tool mod isolates display configuration calls from `explorer.exe`, eliminating any shell instability or freeze risk from display driver stalls:
+Auto Refresh Rate runs as an isolated background tool process via `windhawk.exe`. Operating outside `explorer.exe` ensures display configuration API calls cannot hang the Windows shell:
 
-* **Power subsystems:** Listens to `GUID_ACDC_POWER_SOURCE` and `GUID_POWER_SAVING_STATUS` via `RegisterPowerSettingNotification`.
-* **Window events:** Detects active applications and fullscreen games via `SetWinEventHook` (`EVENT_SYSTEM_FOREGROUND`).
-* **Display configuration:** Queries topologies via `QueryDisplayConfig` and adjusts frequencies using `ChangeDisplaySettingsEx`.
-* **Docking detection:** Inspects connector types (`DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL`) to differentiate built-in laptop panels from external desktop monitors.
+* **Power Events:** Subscribes to `GUID_ACDC_POWER_SOURCE` and `GUID_POWER_SAVING_STATUS` via `RegisterPowerSettingNotification`. Zero polling.
+* **Game & App Detection:** Hooks `EVENT_SYSTEM_FOREGROUND` via `SetWinEventHook` to detect active processes and exclusive fullscreen games.
+* **Mode Switching:** Queries display topologies via `QueryDisplayConfig` and applies rate changes through `ChangeDisplaySettingsEx`.
+* **Docking Logic:** Inspects connector types (`DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL`) to differentiate laptop screens from external desktop monitors.
 
-### Evaluation priority
+## Evaluation priority
 
-When multiple rules match simultaneously, target refresh rates resolve in order:
+When multiple rules match at once, display frequency resolves in strict order:
 
-1. **Manual hotkey lock:** Overrides automated rules until unlocked or cycled back to auto.
-2. **Protected applications:** Pauses switching while capture or streaming tools run (e.g. `obs64`, `discord`).
-3. **Windows Energy Saver:** Drops to power-saving rate immediately when battery saver triggers.
-4. **Foreground apps & game boost:** Applies matched high/low app rules or fullscreen game boost.
-5. **Night schedule:** Applies battery refresh rate during scheduled evening hours.
-6. **Power source baseline:** Applies plugged-in rate on AC or on-battery rate on DC power.
+1. **Manual Hotkey Lock** — `Win + Ctrl + R` override active
+2. **Protected Apps** — Inhibit tools running (`obs64`, `discord`)
+3. **Windows Energy Saver** — Drops to configured battery-saver rate
+4. **Foreground App / Game** — App rules (`blender`, `resolve`) or fullscreen 3D boost
+5. **Night Schedule** — Evening low-Hz comfort window
+6. **Power Baseline** — AC (Panel Max) vs Battery (60 Hz)
+
+## Installation
+
+### From Windhawk Catalog (Recommended)
+1. Search for **Auto Refresh Rate** in the [Windhawk](https://windhawk.net/) client or visit the [catalog page](https://windhawk.net/mods/auto-refresh-rate).
+2. Click **Details** → **Install**.
+
+### Local Development Mod
+1. Open Windhawk → **Advanced** → **Create Local Mod**.
+2. Paste the contents of [`auto-refresh-rate.wh.cpp`](auto-refresh-rate.wh.cpp).
+3. Click **Compile and run**.
+
+_Quick test: Press `Win + A` and toggle Windows Energy Saver to watch the display frequency change instantly._
 
 ## Configuration
 
-All options can be configured interactively from the Windhawk **Settings** tab:
+All settings can be configured interactively from the Windhawk **Settings** tab:
 
-* **Power & battery:** Set target rates on AC, battery (`max`, `60`, `min`, `custom`), and Windows Energy Saver.
-* **Gaming & applications:** Automatic boost for borderless/fullscreen games, per-app refresh rules (`blender`, `resolve`, `affinity`, `screenbox`), and capture inhibition (`obs64`, `discord`).
-* **Display & docking:** Target primary or all displays, enable smart docking (keep external monitors at full rate on battery), and set anti-flicker switch cooldowns.
-* **Shortcuts & schedule:** Global cycle hotkey (`Win + Ctrl + R`), on-screen display badge toggle, and scheduled night hours.
-
-<details>
-<summary><strong>Advanced: Full settings key reference</strong></summary>
+<details open>
+<summary><strong>Full settings reference</strong></summary>
 
 | Setting | Default | Description |
 | :--- | :--- | :--- |
 | **Power & battery** | | |
-| `PowerAndBattery.ChargeSwitchingEnabled` | `true` | Switch refresh rates when connecting or disconnecting power. |
-| `PowerAndBattery.PluggedInRate` | `max` | Refresh rate when connected to AC power (`max`, `60`, `custom`). |
-| `PowerAndBattery.CustomPluggedInRate` | `144` | Target refresh rate in Hz. |
-| `PowerAndBattery.OnBatteryRate` | `60` | Refresh rate while running on battery (`60`, `min`, `match_ac`, `custom`). |
-| `PowerAndBattery.CustomBatteryRate` | `60` | Target refresh rate in Hz. |
-| `PowerAndBattery.EnergySaverEnabled` | `true` | Lower refresh rate while Windows Energy Saver is active. |
-| `PowerAndBattery.EnergySaverRate` | `60` | Refresh rate while Energy Saver is active (`60`, `min`, `custom`). |
-| `PowerAndBattery.CustomEnergySaverRate` | `60` | Target refresh rate in Hz. |
+| `PowerAndBattery.ChargeSwitchingEnabled` | `true` | Switch refresh rates on AC connect / disconnect. |
+| `PowerAndBattery.PluggedInRate` | `max` | Plugged-in rate (`max`, `60`, `custom`). |
+| `PowerAndBattery.CustomPluggedInRate` | `144` | Custom AC target in Hz. |
+| `PowerAndBattery.OnBatteryRate` | `60` | On-battery rate (`60`, `min`, `match_ac`, `custom`). |
+| `PowerAndBattery.CustomBatteryRate` | `60` | Custom battery target in Hz. |
+| `PowerAndBattery.EnergySaverEnabled` | `true` | Lower refresh rate when Windows Energy Saver triggers. |
+| `PowerAndBattery.EnergySaverRate` | `60` | Energy saver rate (`60`, `min`, `custom`). |
+| `PowerAndBattery.CustomEnergySaverRate` | `60` | Custom energy saver target in Hz. |
 | **Gaming & applications** | | |
-| `GamingAndApps.AutoGameBoost` | `true` | Boost to highest supported refresh rate in borderless and fullscreen games. |
-| `GamingAndApps.AppRulesEnabled` | `false` | Apply custom refresh rates when designated apps are focused. |
+| `GamingAndApps.AutoGameBoost` | `true` | Boost to panel max in borderless and fullscreen games. |
+| `GamingAndApps.AppRulesEnabled` | `false` | Apply custom refresh rates for focused apps. |
 | `GamingAndApps.HighRefreshApps` | `[blender, resolve, affinity]` | Apps that boost to maximum refresh rate when focused. |
-| `GamingAndApps.LowRefreshApps` | `[screenbox, netflix]` | Apps locked to battery refresh rate when focused. |
-| `GamingAndApps.InhibitAppsEnabled` | `true` | Pause display switching while capture or presentation tools run. |
-| `GamingAndApps.InhibitApps` | `[obs64, discord]` | Apps that block refresh rate changes while running. |
+| `GamingAndApps.LowRefreshApps` | `[screenbox, netflix]` | Apps locked to battery rate when focused. |
+| `GamingAndApps.InhibitAppsEnabled` | `true` | Freeze rate switching while capture or streaming tools run. |
+| `GamingAndApps.InhibitApps` | `[obs64, discord]` | Apps that block rate switches while running. |
 | **Night schedule** | | |
-| `Schedule.TimeScheduleEnabled` | `false` | Lower refresh rate during scheduled hours to reduce eye strain. |
-| `Schedule.ScheduleStart` | `22:00` | Schedule start time in 24h or 12h format (e.g. `22:00` or `10:00 PM`). |
-| `Schedule.ScheduleEnd` | `07:00` | Schedule end time in 24h or 12h format (e.g. `07:00` or `7:00 AM`). |
+| `Schedule.TimeScheduleEnabled` | `false` | Force battery refresh rate during night hours. |
+| `Schedule.ScheduleStart` | `22:00` | Start time in 24h or 12h format (`22:00` or `10:00 PM`). |
+| `Schedule.ScheduleEnd` | `07:00` | End time in 24h or 12h format (`07:00` or `7:00 AM`). |
 | **Display & transitions** | | |
-| `DisplayAndTransitions.TargetDisplays` | `primary` | Displays to adjust when switching refresh rates (`primary` or `all`). |
-| `DisplayAndTransitions.SmartDockingEnabled` | `true` | Keep external monitors at high refresh rate while lowering only the internal laptop screen on battery. |
-| `DisplayAndTransitions.QuietSwitchEnabled` | `true` | Wait for keyboard and mouse input to pause before lowering refresh rate. |
-| `DisplayAndTransitions.AntiFlickerCooldown` | `3` | Minimum seconds to wait between display switches to avoid rapid panel flashing. |
+| `DisplayAndTransitions.TargetDisplays` | `primary` | Displays to switch (`primary` or `all`). |
+| `DisplayAndTransitions.SmartDockingEnabled` | `true` | Keep external monitors at max rate on battery. |
+| `DisplayAndTransitions.QuietSwitchEnabled` | `true` | Wait for user input to pause before switching rates. |
+| `DisplayAndTransitions.AntiFlickerCooldown` | `3` | Minimum seconds between switches to prevent panel flicker. |
 | **Shortcuts & notifications** | | |
-| `ShortcutsAndNotifications.OsdBadgeEnabled` | `true` | Show a temporary on-screen badge when the refresh rate changes. |
-| `ShortcutsAndNotifications.GlobalHotkeyEnabled` | `false` | Cycle through supported refresh rates or return to auto mode via hotkey. |
-| `ShortcutsAndNotifications.GlobalHotkey` | `Win+Ctrl+R` | Key combination to cycle rates (e.g. `Win+Ctrl+R`, `Ctrl+Alt+R`). |
+| `ShortcutsAndNotifications.NotificationEnabled` | `true` | Show native Windows notification on rate change. |
+| `ShortcutsAndNotifications.GlobalHotkeyEnabled` | `false` | Enable manual cycle hotkey. |
+| `ShortcutsAndNotifications.GlobalHotkey` | `Win+Ctrl+R` | Shortcut to cycle through supported refresh rates. |
 
 </details>
 
 ## Compatibility
 
-* **Windows versions:** Windows 10 (1809+) and Windows 11 (21H2 through 24H2).
+* **OS:** Windows 10 (1809+) and Windows 11 (21H2 through 24H2).
 * **Architectures:** x86-64, ARM64, and x86.
-* **Graphics drivers:** WDDM 2.0+ (standard across Intel, AMD, and NVIDIA drivers on Windows 10/11, including hybrid GPU and MUX laptops).
-* **Display features:** Preserves HDR color metadata, G-Sync, FreeSync, and Variable Refresh Rate (VRR) ranges.
-* **Modern apps:** Tracks UWP and Windows Store applications hosted inside `ApplicationFrameHost.exe`.
-* **Sleep and wake:** Re-synchronizes display state after system resume (`PBT_APMRESUME`).
+* **Drivers:** WDDM 2.0+ across Intel, AMD, and NVIDIA (including MUX / Advanced Optimus laptops).
+* **Color & Sync:** Preserves HDR color metadata, G-Sync, FreeSync, and VRR ranges.
+* **Sleep / Wake:** Re-synchronizes display state on system resume (`PBT_APMRESUME`).
 
-## Troubleshooting & edge cases
+## Troubleshooting
 
-* **Hybrid graphics & MUX switches (Advanced Optimus):** Display paths re-enumerate when switching between integrated and discrete GPUs. The mod hooks `WM_DISPLAYCHANGE` to re-synchronize active monitor handles automatically.
-* **Custom resolutions & overclocked refresh rates:** Modes created in NVIDIA Control Panel, AMD Software, or CRU (Custom Resolution Utility) are enumerated as valid display targets and can be selected in Settings.
-* **Multi-monitor setups:** By default, only the primary monitor is modified (`TargetDisplays: primary`). Switch to `all` to synchronize all monitors, or leave `Smart laptop docking` enabled to preserve external display speeds while on battery.
-* **Flicker reduction:** If your display flashes during rate changes, increase `AntiFlickerCooldown` (default: 3 seconds) under **Display & transitions**.
-* **Live diagnostics:** Check the **Log** tab in Windhawk to inspect real-time display adjustments, AC/battery transitions, and active process detection.
+* **Panel flashes on rate switch:** Increase `DisplayAndTransitions.AntiFlickerCooldown` to `4` or `5` seconds under **Display & transitions**.
+* **External monitors drop to 60 Hz on battery:** Verify `DisplayAndTransitions.SmartDockingEnabled` is `true` and `TargetDisplays` is `primary`.
+* **Diagnostics:** Check the **Log** tab in Windhawk for real-time AC/DC events and resolution logs.
+
+## Changelog
+
+### Version 1.0.0 (2026-09-30)
+* Initial release.
 
 ## Contributing
 
-To report bugs, propose new heuristics, or contribute display engine improvements, see the **[Contributing Guide](CONTRIBUTING.md)**.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, testing checklists, and pull request guidelines.
 
 ## License
 
