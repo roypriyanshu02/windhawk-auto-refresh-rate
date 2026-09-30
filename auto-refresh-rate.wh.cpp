@@ -298,23 +298,6 @@ struct ScopedDcState {
     ScopedDcState& operator=(const ScopedDcState&) = delete;
 };
 
-struct ScopedMutexOwnership {
-    HANDLE m_h = nullptr;
-    bool m_owned = false;
-    explicit ScopedMutexOwnership(HANDLE h) noexcept : m_h(h) {
-        if (m_h) {
-            DWORD res = ::WaitForSingleObject(m_h, INFINITE);
-            m_owned = (res == WAIT_OBJECT_0 || res == WAIT_ABANDONED);
-        }
-    }
-    ~ScopedMutexOwnership() noexcept {
-        if (m_owned && m_h) {
-            ::ReleaseMutex(m_h);
-        }
-    }
-    ScopedMutexOwnership(const ScopedMutexOwnership&) = delete;
-    ScopedMutexOwnership& operator=(const ScopedMutexOwnership&) = delete;
-};
 
 // GUID Definitions
 static constexpr GUID GUID_NULL_LOCAL = {
@@ -449,7 +432,6 @@ static std::atomic<HWND> g_hWnd{nullptr};
 static std::atomic<bool> g_stopRequested{false};
 static HANDLE g_hReadyEvent = nullptr;
 static HWINEVENTHOOK g_hWinEventHook = nullptr;
-extern HANDLE g_toolModProcessMutex;
 
 static constexpr std::array<const GUID*, 4> g_powerGuids = {
     &GUID_ACDC_POWER_SOURCE_LOCAL,
@@ -1985,8 +1967,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 DWORD WINAPI PowerMonitorThreadProc(LPVOID /*lpParam*/) {
     Wh_Log(L"Power monitor thread active (TID %lu).", GetCurrentThreadId());
 
-    ScopedMutexOwnership mutexOwnership{g_toolModProcessMutex};
-
     SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     if (g_stopRequested.load()) return 0;
 
@@ -2164,20 +2144,6 @@ void WhTool_ModUninit() {
 bool g_isToolModProcessLauncher;
 HANDLE g_toolModProcessMutex;
 
-static const WCHAR* NormalizeModId(const WCHAR* id) noexcept {
-    if (!id) return L"";
-    if (_wcsnicmp(id, L"local@", 6) == 0) {
-        return id + 6;
-    }
-    return id;
-}
-
-static bool MatchModId(const WCHAR* id1, const WCHAR* id2) noexcept {
-    if (!id1 || !id2) return false;
-    if (_wcsicmp(id1, id2) == 0) return true;
-    return _wcsicmp(NormalizeModId(id1), NormalizeModId(id2)) == 0;
-}
-
 void WINAPI EntryPoint_Hook() {
     Wh_Log(L">");
     ExitThread(0);
@@ -2212,7 +2178,7 @@ BOOL Wh_ModInit() {
     for (int i = 1; i < argc - 1; i++) {
         if (wcscmp(argv[i], L"-tool-mod") == 0) {
             isToolModProcess = true;
-            if (MatchModId(argv[i + 1], WH_MOD_ID)) {
+            if (wcscmp(argv[i + 1], WH_MOD_ID) == 0) {
                 isCurrentToolModProcess = true;
             }
             break;
@@ -2226,21 +2192,16 @@ BOOL Wh_ModInit() {
     }
 
     if (isCurrentToolModProcess) {
-        std::wstring mutexName = L"windhawk-tool-mod_" + std::wstring(NormalizeModId(WH_MOD_ID));
         g_toolModProcessMutex =
-            CreateMutexW(nullptr, FALSE, mutexName.c_str());
+            CreateMutex(nullptr, TRUE, L"windhawk-tool-mod_" WH_MOD_ID);
         if (!g_toolModProcessMutex) {
             Wh_Log(L"CreateMutex failed");
             ExitProcess(1);
         }
 
         if (GetLastError() == ERROR_ALREADY_EXISTS) {
-            DWORD waitRes = WaitForSingleObject(g_toolModProcessMutex, 2000);
-            if (waitRes != WAIT_OBJECT_0 && waitRes != WAIT_ABANDONED) {
-                Wh_Log(L"Tool mod already running (%s)", WH_MOD_ID);
-                ExitProcess(1);
-            }
-            ReleaseMutex(g_toolModProcessMutex);
+            Wh_Log(L"Tool mod already running (%s)", WH_MOD_ID);
+            ExitProcess(1);
         }
 
         if (!WhTool_ModInit()) {
@@ -2281,7 +2242,9 @@ void Wh_ModAfterInit() {
             return;
     }
 
-    WCHAR commandLine[MAX_PATH + 256];
+    WCHAR
+    commandLine[MAX_PATH + 2 +
+                (sizeof(L" -tool-mod \"" WH_MOD_ID "\"") / sizeof(WCHAR)) - 1];
     swprintf_s(commandLine, L"\"%s\" -tool-mod \"%s\"", currentProcessPath,
                WH_MOD_ID);
 
