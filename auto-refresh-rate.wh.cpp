@@ -133,7 +133,6 @@ When multiple rules trigger at once, display frequency resolves in strict order:
       $description: "Pause display switching while capture or presentation tools run."
     - InhibitApps:
         - "obs64"
-        - "discord"
       $name: "Protected apps"
       $description: "Apps that block refresh rate changes while running. Click '+' to add apps; '.exe' is optional."
   $name: "Gaming & applications"
@@ -1258,6 +1257,7 @@ void LoadSettings() {
 
     DWORD displayAC = (g_settings.targetAC == 0) ? GetMaxRefreshRate() : g_settings.targetAC;
     DWORD displayDC = (g_settings.targetDC == 1) ? GetMinRefreshRate() : ((g_settings.targetDC == 0) ? displayAC : g_settings.targetDC);
+    DWORD resolvedDC = (g_settings.targetDC == 0) ? displayAC : g_settings.targetDC;
 
     // 3. Windows Energy Saver
     if (g_settings.energySaverEnabled && state.isBatterySaverActive) {
@@ -1285,7 +1285,7 @@ void LoadSettings() {
         if (IsAppInList(foreProc, g_parsedLowRefreshApps)) {
             outBrief = L"App saver: " + FormatAppNameForDisplay(foreProc);
             outReason = L"Low-refresh app in focus ('" + foreProc + L"' -> " + std::to_wstring(displayDC) + L" Hz)";
-            return g_settings.targetDC;
+            return resolvedDC;
         } else if (IsAppInList(foreProc, g_parsedHighRefreshApps)) {
             outBrief = L"App boost: " + FormatAppNameForDisplay(foreProc);
             outReason = L"High-refresh app in focus ('" + foreProc + L"' -> " + std::to_wstring(displayAC) + L" Hz)";
@@ -1313,7 +1313,7 @@ void LoadSettings() {
         if (IsCurrentTimeInSchedule(g_settings.scheduleStart, g_settings.scheduleEnd)) {
             outBrief = L"Night schedule";
             outReason = L"Night schedule active (" + std::to_wstring(displayDC) + L" Hz)";
-            return g_settings.targetDC;
+            return resolvedDC;
         }
     }
 
@@ -1327,7 +1327,7 @@ void LoadSettings() {
         } else {
             outBrief = L"Battery (" + std::to_wstring(state.batteryPercent) + L"%)";
             outReason = L"Battery power (" + std::to_wstring(displayDC) + L" Hz, " + std::to_wstring(state.batteryPercent) + L"% remaining)";
-            return g_settings.targetDC;
+            return resolvedDC;
         }
     }
 
@@ -1432,7 +1432,7 @@ void ShowNativeNotification(DWORD hz, const std::wstring& reasonBrief) {
         wcsncpy_s(modNid.szTip, tip.c_str(), _TRUNCATE);
         wcsncpy_s(modNid.szInfoTitle, title.c_str(), _TRUNCATE);
         wcsncpy_s(modNid.szInfo, info.c_str(), _TRUNCATE);
-        modNid.dwInfoFlags = NIIF_INFO;
+        modNid.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND;
 
         Shell_NotifyIconW(NIM_MODIFY, &modNid);
         SetTimer(hWnd, TIMER_ID_TRAY_CLEANUP, TRAY_ICON_LIFETIME_MS, nullptr);
@@ -1463,8 +1463,9 @@ void ShowNativeNotification(DWORD hz, const std::wstring& reasonBrief) {
         }
     }
 
-    // Smart docking: on battery, include the internal laptop panel so it can lower rate even if external monitor is primary
-    if (!allDisplays && g_settings.smartDockingEnabled && !g_state.isAC && !internalDevice.empty()) {
+    // Smart docking: always include the internal laptop panel when smart docking is enabled,
+    // so it lowers on battery and raises back to full rate when AC power returns.
+    if (!allDisplays && g_settings.smartDockingEnabled && !internalDevice.empty()) {
         if (std::find(devices.begin(), devices.end(), internalDevice) == devices.end()) {
             devices.push_back(std::move(internalDevice));
         }
