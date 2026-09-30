@@ -38,7 +38,7 @@ _Tip: To test immediately without unplugging power, toggle Windows Energy Saver 
 
 ## How it works
 
-Auto Refresh Rate runs in a dedicated background process via `windhawk.exe` and hooks native Windows event notifications without background polling:
+Auto Refresh Rate runs in a dedicated background process via `windhawk.exe` and hooks native Windows event notifications without background polling. Running as a dedicated tool mod isolates display configuration calls from `explorer.exe`, eliminating any shell instability or freeze risk from display driver stalls:
 
 * **Power subsystems:** Listens to `GUID_ACDC_POWER_SOURCE` and `GUID_POWER_SAVING_STATUS` via `RegisterPowerSettingNotification`.
 * **Window events:** Detects active applications and fullscreen games via `SetWinEventHook` (`EVENT_SYSTEM_FOREGROUND`).
